@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WE Learn 自动挂机翻页
 // @namespace    local.welearn.autopager
-// @version      3.2.7
+// @version      3.3.3
 // @description  单标签页按时翻页、媒体播放、自动作答与完成度核算；可选择仅在网站标记完成后翻页
 // @match        https://welearn.sflep.com/*
 // @match        https://*.sflep.com/*
@@ -21,13 +21,13 @@
   const RECORDS = 'wl_ap_records_v32', TOTAL = 'wl_ap_total_v32';
   function storage(name) { try { return W[name]; } catch (_) { return null; } }
   const LS = storage('localStorage'), SS = storage('sessionStorage');
-  const C = { enabled: true, minDwell: 20, jitterMin: 0, jitterMax: 9, maxPages: 300, mode: 'duration', autoAnswer: false, minAccuracy: 100 };
+  const C = { enabled: true, minDwell: 20, jitterMin: 0, jitterMax: 9, maxPages: 300, mode: 'duration', autoAnswer: false, minAccuracy: 100, muteMedia: true };
   const S = { owner: false, pending: false, release: null, candidate: 0, lockError: '', paused: false,
     stopped: false, warning: '', reentry: false, key: '', elapsed: 0, jitter: 0, lastTick: Date.now(),
     awaiting: null, frame: null, busy: false, src: '', observer: null, reports: new Map(),
     grantAt: 0, grant: false, parentOrigin: '', action: '初始化', clicks: 0, clickedAt: 0, savedAt: 0,
     media: { count: 0, done: true, ready: true, playing: false, blocked: false }, hud: null, position: null, dragging: false,
-    awaitingCompletion: false, autoBox: null, progress: null, total: 0, records: {}, userPaused: false, totalSavedAt: 0, migrated: false,
+    awaitingCompletion: false, autoBox: null, muteBox: null, progress: null, total: 0, records: {}, userPaused: false, totalSavedAt: 0, migrated: false,
     progressArmed: true, lastDocId: '', lastHref: '', oldDocId: '', oldHref: '', sectionSwitching: false, sectionChangedAt: 0,
     frameLoadedAt: 0, observedCurrent: '', switchKey: '', srcAtSwitch: '', docIdBySection: {}, hrefBySection: {},
     docId: Math.random().toString(36).slice(2) + Date.now().toString(36) };
@@ -44,6 +44,10 @@
     if (typeof obj.enabled === 'boolean') C.enabled = obj.enabled;
     if (obj.mode === 'duration' || obj.mode === 'completion') C.mode = obj.mode;
     if (typeof obj.autoAnswer === 'boolean') C.autoAnswer = obj.autoAnswer;
+    if (typeof obj.muteMedia === 'boolean' && obj.muteMedia !== C.muteMedia) {
+      C.muteMedia = obj.muteMedia;
+      setMuted(C.muteMedia);
+    }
     if (typeof obj.minAccuracy === 'number' && Number.isFinite(obj.minAccuracy)) C.minAccuracy = clamp(Math.round(obj.minAccuracy), 0, 100);
   }
   function load() {
@@ -119,15 +123,68 @@
   function check() { const text = scan(); if (text) halt(text); return !!text; }
   function observeDialogs() { const original = W.alert; W.alert = function (message) { const text = String(message); if (warningText(text)) halt(text.slice(0, 120)); return original.call(W, message); }; }
   function running() { return C.enabled && S.owner && !S.paused && !S.stopped && !S.warning; }
-  function mediaEls(doc = document, depth = 0) {
-    const list = Array.from(doc.querySelectorAll('audio,video'));
-    if (depth < 3) for (const el of doc.querySelectorAll('iframe,frame')) { try { if (el.contentDocument) list.push(...mediaEls(el.contentDocument, depth + 1)); } catch (_) {} }
-    return list;
+  function shadowMedia(root, found, depth) {
+    if (!root || depth > 3) return;
+    for (const host of root.querySelectorAll('*')) {
+      if (!host.shadowRoot) continue;
+      for (const el of host.shadowRoot.querySelectorAll('audio,video')) found.add(el);
+      shadowMedia(host.shadowRoot, found, depth + 1);
+    }
   }
-  function localMedia() { const list = mediaEls(); return { count: list.length, done: list.every(el => el.ended || Number.isFinite(el.duration) && el.duration > 0 && el.currentTime >= el.duration - 0.5), playing: list.some(el => !el.paused && !el.ended), blocked: list.some(el => el.paused && !el.ended), ready: true }; }
+  function mediaEls(doc = document, depth = 0) {
+    const found = new Set();
+    try { for (const el of doc.querySelectorAll('audio,video')) found.add(el); } catch (_) {}
+    try { shadowMedia(doc, found, 0); } catch (_) {}
+    if (depth < 3) for (const el of doc.querySelectorAll('iframe,frame')) { try { if (el.contentDocument) for (const m of mediaEls(el.contentDocument, depth + 1)) found.add(m); } catch (_) {} }
+    return Array.from(found);
+  }
+  // 立即把静音状态应用到当前媒体（包括正在播放的媒体）。
+  function setMuted(flag) {
+    for (const el of mediaEls()) {
+      try {
+        el.muted = flag;
+        if (flag) el.dataset.wlMuted = '1'; else delete el.dataset.wlMuted;
+      } catch (_) {}
+    }
+  }
+  const MEDIA = new WeakMap();
+  function mediaRecord(el) {
+    let page = '';
+    try { page = el.ownerDocument.defaultView.location.href; } catch (_) {}
+    const key = JSON.stringify([page, el.getAttribute('src'), el.currentSrc,
+      Array.from(el.querySelectorAll('source'), s => [s.getAttribute('src'), s.type, s.media])]);
+    let record = MEDIA.get(el);
+    if (!record) {
+      record = { key: key, stream: el.srcObject, done: false };
+      MEDIA.set(el, record);
+      // 课件会在 ended 回调中归零；先捕获事件，保留本媒体的播放完成状态。
+      el.addEventListener('ended', () => { mediaRecord(el).done = true; }, true);
+      el.addEventListener('emptied', () => {
+        mediaRecord(el).done = false;
+        delete el.dataset.wlPlayAt;
+      }, true);
+    } else if (record.key !== key || record.stream !== el.srcObject) {
+      record.key = key; record.stream = el.srcObject; record.done = false;
+      delete el.dataset.wlPlayAt;
+    }
+    return record;
+  }
+  function mediaEnded(el) { return mediaRecord(el).done || el.ended; }
+  function localMedia() { const list = mediaEls(); return { count: list.length, done: list.every(el => mediaEnded(el) || Number.isFinite(el.duration) && el.duration > 0 && el.currentTime >= el.duration - 0.5), playing: list.some(el => !el.paused && !mediaEnded(el)), blocked: list.some(el => el.paused && !mediaEnded(el)), ready: true }; }
+  // 自动播放并静音：静音是浏览器允许无手势自动播放的关键；失败后每隔几秒重试，不再永久放弃。
   function play() {
-    for (const el of mediaEls()) if (el.paused && !el.ended && el.dataset.wlPlayFailed !== '1') {
-      try { const p = el.play(); if (p && p.catch) p.catch(() => { el.dataset.wlPlayFailed = '1'; }); } catch (_) { el.dataset.wlPlayFailed = '1'; }
+    for (const el of mediaEls()) {
+      if (mediaEnded(el) || !el.paused) continue;
+      try { if (!el.hasAttribute('playsinline')) el.setAttribute('playsinline', ''); } catch (_) {}
+      if (C.muteMedia) { try { el.muted = true; el.defaultMuted = true; el.dataset.wlMuted = '1'; } catch (_) {} }
+      else if (el.dataset.wlMuted === '1') { try { el.muted = false; delete el.dataset.wlMuted; } catch (_) {} }
+      const now = Date.now(), last = Number(el.dataset.wlPlayAt || 0);
+      if (last && now - last < 4000) continue;
+      el.dataset.wlPlayAt = String(now);
+      try {
+        const p = el.play();
+        if (p && p.catch) p.catch(err => { el.dataset.wlPlayError = String(err && err.name || err); });
+      } catch (e) { el.dataset.wlPlayError = String(e && e.name || e); }
     }
   }
   function children() { return TOP ? (frame() ? [frame()] : []) : Array.from(document.querySelectorAll('iframe,frame')); }
@@ -167,7 +224,8 @@
     const tag = el.tagName.toLowerCase();
     const names = { 'et-blank': 'etBlank', 'et-multi-blank': 'etMultiBlank', 'et-choice': 'etChoice', 'et-select': 'etSelect',
       'et-tof': 'etTof', 'et-tick-blank': 'etTickBlank', 'et-writing': 'etWriting', 'et-translate': 'etTranslate',
-      'et-score-table': 'etScoreTable', 'et-media': 'etMedia', 'et-recorder': 'etRecorder', 'et-multi-noinput': 'etMultiNoinput' };
+      'et-score-table': 'etScoreTable', 'et-media': 'etMedia', 'et-recorder': 'etRecorder', 'et-multi-noinput': 'etMultiNoinput',
+      'et-talk': 'etTalk', 'et-follow-me': 'etFollowMe', 'et-camera': 'etCamera' };
     for (const name of [names[tag], 'etBlank'].filter(Boolean)) {
       try { const c = W.angular.element(el).controller(name); if (c) return c; } catch (_) {}
     }
@@ -209,9 +267,12 @@
     if (tag === 'et-choice' || tag === 'et-select' || tag === 'et-tof') return (Array.isArray(c.value) ? c.value.length : trim(c.value).length) > 0;
     if (tag === 'et-tick-blank') return !!(c.tickedItems && c.tickedItems.length);
     if (tag === 'et-recorder') return (c.submitFlag || Number(c.recordingCount) > 0 || Number(c.score) > 0) ? true : null;
+    // 口语/摄像头的原生进度按录制次数判定；跟读必须完成全部句子。
+    if (tag === 'et-talk' || tag === 'et-camera') return Number(c.recordingCount) > 0 ? true : null;
+    if (tag === 'et-follow-me') return (typeof c.isCompleted === 'function' ? c.isCompleted() : c.isCompleted) === true ? true : null;
     if (tag === 'et-media') {
       const media = el.querySelector('video,audio');
-      return media ? !!media.ended : (c.isCompleted === true ? true : null);
+      return media ? !!mediaEnded(media) : (c.isCompleted === true ? true : null);
     }
     if (tag === 'et-writing' || tag === 'et-translate') { const ta = el.querySelector('textarea'); return trim((c && c.value) || (ta && ta.value)).length > 0; }
     return null;
@@ -228,8 +289,9 @@
     if (!isCourseware()) return null;
     const item = findItem(); if (!item) return null;
     const list = progressEls();
-    let done = 0, unknown = 0, notscored = 0;
+    let done = 0, unknown = 0, notscored = 0, voice = 0;
     const missing = [];
+    const VOICE_TAGS = { 'et-recorder': 1, 'et-talk': 1, 'et-camera': 1, 'et-follow-me': 1 };
     for (const el of list) {
       const tag = el.tagName.toLowerCase();
       if (isNotScored(el)) notscored++;
@@ -238,16 +300,25 @@
       if (state === true) done++;
       else if (state === false) missing.push({ tag: tag, index: el.getAttribute('et-index') || '', reason: 'empty' });
       else { unknown++; missing.push({ tag: tag, index: el.getAttribute('et-index') || '', reason: 'manual' }); }
+      if (VOICE_TAGS[tag] && state !== true) voice++;
     }
     const info = item.scormInfo || {};
-    const site = Number(info.progressMeasure);
-    let completion = Number.isFinite(site) ? Math.round(clamp(site, 0, 1) * 100) : (list.length ? Math.round(done / list.length * 100) : 100);
+    const rawSite = info.progressMeasure;
+    const siteNum = Number(rawSite);
+    const siteValid = rawSite !== '' && rawSite != null && Number.isFinite(siteNum);
+    const siteCompletion = siteValid ? Math.round(clamp(siteNum, 0, 1) * 100) : null;
+    const localRatio = list.length ? done / list.length : null;
+    const localCompletion = localRatio == null ? null : Math.round(localRatio * 100);
+    // 课件 SCORM 值可能滞后于组件状态；显示与闸门取网站值与本地已完成的较大者，避免卡在旧完成度。
+    let completion;
+    if (localCompletion != null) completion = Math.max(siteCompletion == null ? 0 : siteCompletion, localCompletion);
+    else completion = siteCompletion == null ? 100 : siteCompletion;
     // 无交互页由课件 3 秒后自行 commit，控制器的 scormInfo 不会回填，按结构完成处理。
     if (!list.length && item.type === 'no_interaction') completion = 100;
     const accuracy = Math.round(Number(info.score && info.score.scaled) || 0);
     const report = { page: route(), href: location.pathname + (location.hash || ''), docId: S.docId, itemId: item.id, type: item.type || '', submitted: !!item.isSubmitted, browse: !!item.isBrowseMode, endTab: !!item.isEndTab,
-      total: list.length, done: done, unknown: unknown, notscored: notscored, manual: unknown, completion: completion,
-      accuracy: accuracy, raw: Number(info.score && info.score.raw) || 0, missing: missing.slice(0, 10),
+      total: list.length, done: done, unknown: unknown, notscored: notscored, manual: unknown, voice: voice, completion: completion,
+      accuracy: accuracy, raw: Number(info.score && info.score.raw) || 0, siteCompletion: siteCompletion, localCompletion: localCompletion, missing: missing.slice(0, 10),
       error: E.error || '', minAccuracy: C.minAccuracy, issues: E.issues.length, at: Date.now() };
     const reason = gateFor(report);
     report.blockReason = report.submitted ? '' : reason;
@@ -467,8 +538,9 @@
   }
 
   // 供自动化测试与诊断使用；正式运行时同样可用。
-  W.__WLAP_ENGINE__ = { version: '3.2.7', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
-    runPage: runPage, route: route, config: C, gate: gateFor, state: () => ({ busy: E.busy, done: E.done, error: E.error, blockReason: E.blockReason, issues: E.issues, report: E.report, grant: S.grant, grantAt: S.grantAt }) };
+  W.__WLAP_ENGINE__ = { version: '3.3.3', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
+    runPage: runPage, route: route, config: C, gate: gateFor, mediaCount: () => mediaEls().length,
+    mediaState: () => mediaEls().map(e => ({ muted: !!e.muted, paused: !!e.paused, ended: !!e.ended })), state: () => ({ busy: E.busy, done: E.done, error: E.error, blockReason: E.blockReason, issues: E.issues, report: E.report, grant: S.grant, grantAt: S.grantAt }) };
 
   function granted() { return TOP ? (C.enabled && S.owner && !S.warning && !S.stopped && !S.userPaused && !S.busy && !S.awaiting && !S.sectionSwitching) : S.grant && Date.now() - S.grantAt < 7000 && !S.warning; }
   function broadcast() {
@@ -499,8 +571,11 @@
         if (d.progress && typeof d.progress === 'object' && Number.isFinite(Number(d.progress.completion))) {
           const p = d.progress;
           if (!acceptProgress(p)) return;
+          const siteC = p.siteCompletion == null ? null : clamp(Math.round(Number(p.siteCompletion)), 0, 100);
+          const localC = p.localCompletion == null ? null : clamp(Math.round(Number(p.localCompletion)), 0, 100);
           S.progress = { page: String(p.page || ''), href: String(p.href || ''), completion: clamp(Math.round(Number(p.completion)), 0, 100), accuracy: clamp(Math.round(Number(p.accuracy)), 0, 100),
-            total: clamp(Number(p.total) || 0, 0, 1000), done: clamp(Number(p.done) || 0, 0, 1000), manual: clamp(Number(p.manual) || 0, 0, 1000),
+            siteCompletion: siteC, localCompletion: localC,
+            total: clamp(Number(p.total) || 0, 0, 1000), done: clamp(Number(p.done) || 0, 0, 1000), manual: clamp(Number(p.manual) || 0, 0, 1000), voice: clamp(Number(p.voice) || 0, 0, 1000),
             submitted: p.submitted === true, type: String(p.type || ''), error: String(p.error || ''), blockReason: String(p.blockReason || ''),
             minAccuracy: clamp(Math.round(Number(p.minAccuracy == null ? 100 : p.minAccuracy)), 0, 100), issues: clamp(Number(p.issues) || 0, 0, 1000), at: Date.now(), origin: event.origin };
           recordAuto(S.progress);
@@ -570,8 +645,11 @@
     if (completed(currentItem())) return true;
     return !!(S.progress && S.progress.submitted && S.progress.completion >= 100 && Date.now() - S.progress.at < 15000);
   }
+  // 含未完成的人工语音项：只挂停留时长，不要求完成度/提交。
+  function voicePending() { return !!(S.progress && Number(S.progress.voice) > 0 && Date.now() - S.progress.at < 15000); }
   function completionWaitText() {
     const a = S.progress;
+    if (voicePending()) return '人工语音页：按停留时长放行';
     if (a && !a.submitted && a.total > 0) {
       if (a.blockReason) return '已暂停自动提交：' + a.blockReason + '，请人工核对';
       if (a.manual > 0 && a.completion < 100) return '完成度 ' + a.completion + '%：有 ' + a.manual + ' 项需人工完成（录音/口语/媒体等）';
@@ -616,7 +694,8 @@
     const info = nextInfo();
     if (info.index < 0) { S.paused = true; action('找不到当前目录小节，请重新进入课件'); broadcast(); return false; }
     if (!info.next) { S.stopped = true; action('已到课程末尾'); broadcast(); return false; }
-    if (C.mode === 'completion' && !verifiedComplete()) {
+    const voiceBypass = C.mode === 'completion' && !verifiedComplete() && voicePending();
+    if (C.mode === 'completion' && !verifiedComplete() && !voiceBypass) {
       S.paused = true;
       S.awaitingCompletion = true;
       action(completionWaitText());
@@ -630,7 +709,7 @@
     try {
       button.click(); // 唯一导航入口，保留原生 EndSCO / SelectSCO / StartSCO 流程。
       S.clicks++; const count = stats(); count.clicks = (Number(count.clicks) || 0) + 1; write(SS, 'wl_ap_stats_v3', count);
-      action((manual ? '手动' : '定时') + '翻到：' + label(info.next.el).slice(0, 40)); return true;
+      action((manual ? '手动' : '定时') + '翻到：' + label(info.next.el).slice(0, 40) + (voiceBypass ? '（人工语音页，按停留放行）' : '')); return true;
     } catch (_) { S.awaiting = null; S.paused = true; action('原生翻页失败，已暂停'); return false; }
   }
   function tick() {
@@ -645,9 +724,10 @@
     if (S.warning || S.stopped) { paint(); return; }
     if (S.awaitingCompletion) {
       if (S.userPaused) { paint(); return; }
-      if (verifiedComplete()) {
+      if (verifiedComplete() || voicePending()) {
+        const voice = !verifiedComplete() && voicePending();
         S.awaitingCompletion = false; S.paused = false; S.lastTick = now;
-        action('网站已标记本节完成，继续推进');
+        action(voice ? '人工语音页：按停留时长放行' : '网站已标记本节完成，继续推进');
       } else { action(completionWaitText()); paint(); return; }
     }
     if (S.paused) { paint(); return; }
@@ -658,8 +738,10 @@
     if (delta >= 0 && delta <= 15000) S.elapsed += delta;
     play(); S.media = summary(); if (now - S.savedAt > 5000) { S.savedAt = now; saveDwell(); }
     if (S.elapsed / 1000 < C.minDwell + S.jitter) { action('停留 ' + fmt(S.elapsed / 1000) + ' / ' + fmt(C.minDwell + S.jitter)); return; }
-    if (!S.media.ready) { action('等待课件脚本回执，暂不翻页'); return; }
-    if (!S.media.done) { action(S.media.blocked ? '媒体未播完，请在课件中点播放' : '等待媒体播完'); return; }
+    if (!voicePending()) {
+      if (!S.media.ready) { action('等待课件脚本回执，暂不翻页'); return; }
+      if (!S.media.done) { action(S.media.blocked ? '媒体未播完，请在课件中点播放' : '等待媒体播完'); return; }
+    }
     next();
   }
   function resume() {
@@ -695,15 +777,17 @@
     W.addEventListener('resize', () => { if (S.position) place(S.position.x, S.position.y, true); });
     if (typeof ResizeObserver === 'function') new ResizeObserver(() => { if (S.position && !S.dragging) place(S.position.x, S.position.y); }).observe(S.hud);
   }
-  function sync() { if (S.dwell && document.activeElement !== S.dwell) S.dwell.value = String(C.minDwell); if (S.extra && document.activeElement !== S.extra) S.extra.value = String(C.jitterMax); if (S.min && document.activeElement !== S.min) S.min.value = String(C.minAccuracy); if (S.mode && document.activeElement !== S.mode) S.mode.value = C.mode; if (S.autoBox) S.autoBox.checked = C.autoAnswer; }
+  function sync() { if (S.dwell && document.activeElement !== S.dwell) S.dwell.value = String(C.minDwell); if (S.extra && document.activeElement !== S.extra) S.extra.value = String(C.jitterMax); if (S.min && document.activeElement !== S.min) S.min.value = String(C.minAccuracy); if (S.mode && document.activeElement !== S.mode) S.mode.value = C.mode; if (S.autoBox) S.autoBox.checked = C.autoAnswer; if (S.muteBox) S.muteBox.checked = C.muteMedia; }
   function paint() {
     if (!S.status) return; const info = nextInfo(), m = S.media;
     const a = S.progress, rec = recordStats();
+    const ahead = !!(a && a.siteCompletion != null && a.localCompletion != null && a.localCompletion > a.siteCompletion);
     S.status.textContent = ['状态：' + (!C.enabled ? '已关闭' : S.warning ? '网站提示，已暂停' : !S.owner ? '等待控制权' : S.stopped ? '已结束' : S.paused ? (S.awaitingCompletion ? '等待本节完成' : '已暂停') : '运行中'),
       '模式：' + (C.mode === 'completion' ? '完成度模式（需网站标记完成）' : '时长模式'),
       '当前：' + (info.index >= 0 ? (info.index + 1) + '/' + info.list.length + ' ' + label(info.list[info.index].el) : '等待目录'),
-      '完成度：' + (a && a.total > 0 ? a.completion + '%（' + a.done + '/' + a.total + ' 项' + (a.manual ? '，' + a.manual + ' 项需人工' : '') + '）' : completed(currentItem()) ? '网站已标记完成' : '等待课件'),
+      '完成度：' + (a && a.total > 0 ? a.completion + '%（' + a.done + '/' + a.total + ' 项' + (a.manual ? '，' + a.manual + ' 项需人工' : '') + (ahead ? '，网站仍记录 ' + a.siteCompletion + '%' : '') + '）' : completed(currentItem()) ? '网站已标记完成' : '等待课件'),
       '正确率：' + (a ? a.accuracy + '%' + (a.type === 'objective' ? '（要求 ≥' + a.minAccuracy + '%）' : '') : '—'),
+      '人工语音：' + (a && a.voice > 0 ? a.voice + ' 项，按停留时长放行（不要求完成度）' : '—'),
       '学习时长：本页 ' + fmt(S.elapsed / 1000) + ' · 本地累计 ' + fmt(S.total),
       '自动作答：' + (!C.autoAnswer ? '关闭' : !a ? '等待课件' : a.submitted ? '已提交' : a.total > 0 ? '已填 ' + a.done + '/' + a.total + (a.manual ? '，待人工 ' + a.manual : '') + (a.blockReason ? '，已拦截：' + a.blockReason : '') + (a.error ? '（' + a.error + '）' : '') : '无交互题'),
       '记录：' + rec.count + ' 节 · 平均正确率 ' + rec.accuracy + '%',
@@ -711,21 +795,23 @@
       '翻页：本次 ' + S.clicks + '，累计 ' + (Number(stats().clicks) || 0), S.action, '实际学时由网站记录'].join('\n');
   }
   function buildHud() {
-    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.2.7'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
+    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.3.3'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
     hud.style.cssText = 'position:fixed;left:12px;top:12px;z-index:2147483647;width:330px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);box-sizing:border-box;background:rgba(19,24,32,.96);color:#edf1f7;border:1px solid #536278;border-radius:10px;box-shadow:0 5px 22px #0006;font:13px/1.6 system-ui,sans-serif;overflow:hidden;';
     const bs = 'background:#2d3a4e;color:#edf1f7;border:1px solid #536278;border-radius:5px;padding:3px 8px;font:inherit;cursor:pointer';
-    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.2.7</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
+    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.3.3</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
       '<div style="padding:10px 12px;overflow-y:auto;max-height:calc(100vh - 80px);box-sizing:border-box"><div class="wl-ap-status" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>' +
       '<label style="display:block;margin-top:8px">模式 <select aria-label="运行模式" class="wl-ap-mode" style="background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"><option value="duration">时长模式：停留并播放后翻页</option><option value="completion">完成度模式：仅网站标记完成后翻页</option></select></label>' +
       '<label style="display:flex;gap:6px;align-items:center;margin-top:7px"><input type="checkbox" class="wl-ap-auto"> 自动作答（保留已填答案，默认关闭）</label>' +
+      '<label style="display:flex;gap:6px;align-items:center;margin-top:5px"><input type="checkbox" class="wl-ap-mute"> 自动静音播放媒体</label>' +
       '<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-top:8px"><label>停留 <input aria-label="每页停留" class="wl-ap-dwell" title="支持秒数、29m、1h" style="width:60px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label><label>随机≤ <input aria-label="随机停留上限" class="wl-ap-jit" style="width:45px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label><label>正确率≥ <input aria-label="自动提交最低正确率" class="wl-ap-min" title="0-100，默认100" style="width:42px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label></div>' +
       '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:8px">' + [['apply','应用'],['pause','暂停'],['resume','继续'],['next','下一节'],['toggle','开/关']].map(([act,text]) => '<button data-act="' + act + '" style="' + bs + '">' + text + '</button>').join('') +
       '</div><div style="color:#b4c2d5;font-size:11px;margin-top:7px">拖动标题栏移动 · 回车保存时间<br>Ctrl+Alt+S 暂停/继续 · Ctrl+Alt+A 开关</div></div>';
-    document.documentElement.appendChild(hud); S.hud = hud; S.status = hud.querySelector('.wl-ap-status'); S.dwell = hud.querySelector('.wl-ap-dwell'); S.extra = hud.querySelector('.wl-ap-jit'); S.mode = hud.querySelector('.wl-ap-mode'); S.autoBox = hud.querySelector('.wl-ap-auto'); S.min = hud.querySelector('.wl-ap-min');
+    document.documentElement.appendChild(hud); S.hud = hud; S.status = hud.querySelector('.wl-ap-status'); S.dwell = hud.querySelector('.wl-ap-dwell'); S.extra = hud.querySelector('.wl-ap-jit'); S.mode = hud.querySelector('.wl-ap-mode'); S.autoBox = hud.querySelector('.wl-ap-auto'); S.muteBox = hud.querySelector('.wl-ap-mute'); S.min = hud.querySelector('.wl-ap-min');
     const actions = { reset: resetPosition, apply: setDwell, pause, resume, next: () => next(true), toggle };
     hud.addEventListener('click', e => { const b = e.target.closest('button[data-act]'); if (b) actions[b.dataset.act](); });
     S.mode.addEventListener('change', () => { C.mode = S.mode.value === 'completion' ? 'completion' : 'duration'; S.awaitingCompletion = false; S.paused = false; S.userPaused = false; saveConfig(); S.lastTick = Date.now(); action(C.mode === 'completion' ? '已切换到完成度模式' : '已切换到时长模式'); });
     S.autoBox.addEventListener('change', () => { C.autoAnswer = S.autoBox.checked; saveConfig(); action(C.autoAnswer ? '已开启自动作答' : '已关闭自动作答'); });
+    S.muteBox.addEventListener('change', () => { C.muteMedia = S.muteBox.checked; setMuted(C.muteMedia); saveConfig(); action(C.muteMedia ? '已开启静音自动播放' : '已关闭静音自动播放'); });
     for (const input of [S.dwell, S.extra, S.min]) input.addEventListener('keydown', e => { if (e.key === 'Enter') { setDwell(); input.blur(); e.stopPropagation(); } });
     sync(); paint(); drag(hud.querySelector('.wl-ap-drag'));
     const p = read(LS, POS, null); if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) place(p.x, p.y); else resetPosition();
