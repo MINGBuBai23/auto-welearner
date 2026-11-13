@@ -63,7 +63,7 @@ def main() -> int:
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.clock.install()
             page.add_init_script("if (window.top === window) { localStorage.clear(); sessionStorage.clear(); "
-                                 "localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,"
+                                 "localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,"
                                  "minDwell:300,jitterMin:0,jitterMax:0,mode:'duration',autoAnswer:false})); }")
             page.add_init_script("if (window.top === window) {\n" + script + "\n}")
             child_html = CHILD_HTML.replace("setInterval(() =>", "addEventListener('message', e => { if (e.data === 'move') { location.hash = '/102'; window.__send(); } });\nsetInterval(() =>")
@@ -89,7 +89,7 @@ def main() -> int:
             page.wait_for_selector("#wl-ap-hud")
             page.clock.run_for(1600)
             old_child = next(f for f in page.frames if "navigation-player" in f.url)
-            old_report = old_child.evaluate("() => ({docId:window.__doc, href:location.pathname + location.hash, completion:100, submitted:true})")
+            old_report = old_child.evaluate("() => ({docId:window.__doc, href:location.pathname + location.hash, completion:100, submitted:true, studySeconds:1800})")
             page.click("#wl-ap-hud [data-act='next']")
             page.wait_for_timeout(250)
             page.clock.run_for(2200)

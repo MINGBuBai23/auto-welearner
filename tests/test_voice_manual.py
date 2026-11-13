@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import test_integration as ti  # noqa: E402
 
 SCO = "5/3-1"  # 11 blanks + 2 recorders
-CONFIG = ("try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:1,jitterMin:0,jitterMax:0,"
+CONFIG = ("try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:1,jitterMin:0,jitterMax:0,"
           "maxPages:10,mode:'completion',autoAnswer:true,minAccuracy:100,muteMedia:true})); } catch (e) {}")
 
 

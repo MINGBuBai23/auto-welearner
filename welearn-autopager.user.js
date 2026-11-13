@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WE Learn 自动挂机翻页
 // @namespace    local.welearn.autopager
-// @version      3.3.4
-// @description  单标签页按时翻页、媒体播放、自动作答与完成度核算；可选择仅在网站标记完成后翻页
+// @version      3.3.5
+// @description  单标签页每节累计30分钟翻页，按目录用时跳过已满小节；支持媒体播放、自动作答与完成度核算
 // @match        https://welearn.sflep.com/*
 // @match        https://*.sflep.com/*
 // @match        https://*.sflep.cn/*
@@ -19,17 +19,18 @@
   const TOP = W.top === W, HUD = 'wl-ap-hud', CONFIG = 'wl_autopager_cfg_v7', LEGACY_CONFIG = 'wl_autopager_cfg_v6';
   const POS = 'wl_ap_hud_position_v1', PROTOCOL = 'wl-ap-v4';
   const RECORDS = 'wl_ap_records_v32', TOTAL = 'wl_ap_total_v32';
+  const SECTION_TIMES = 'wl_ap_section_times_v1', SECTION_LIMIT = 30 * 60 * 1000;
   function storage(name) { try { return W[name]; } catch (_) { return null; } }
   const LS = storage('localStorage'), SS = storage('sessionStorage');
-  const C = { enabled: true, minDwell: 20, jitterMin: 0, jitterMax: 9, maxPages: 300, mode: 'duration', autoAnswer: false, minAccuracy: 100, muteMedia: true };
+  const C = { enabled: true, minDwell: 20, jitterMin: 0, jitterMax: 9, maxPages: 300, mode: 'section', sectionPolicy: 1, autoAnswer: false, minAccuracy: 100, muteMedia: true };
   const S = { owner: false, pending: false, release: null, candidate: 0, lockError: '', paused: false,
-    stopped: false, warning: '', reentry: false, key: '', elapsed: 0, jitter: 0, lastTick: Date.now(),
+    stopped: false, warning: '', reentry: false, key: '', elapsed: 0, sectionElapsed: 0, siteTime: false, jitter: 0, lastTick: Date.now(),
     awaiting: null, frame: null, busy: false, src: '', observer: null, reports: new Map(),
     grantAt: 0, grant: false, parentOrigin: '', action: '初始化', clicks: 0, clickedAt: 0, savedAt: 0,
     media: { count: 0, done: true, ready: true, playing: false, blocked: false }, hud: null, position: null, dragging: false,
     awaitingCompletion: false, autoBox: null, muteBox: null, progress: null, total: 0, records: {}, userPaused: false, totalSavedAt: 0, migrated: false,
     progressArmed: true, lastDocId: '', lastHref: '', oldDocId: '', oldHref: '', sectionSwitching: false, sectionChangedAt: 0,
-    frameLoadedAt: 0, observedCurrent: '', switchKey: '', srcAtSwitch: '', docIdBySection: {}, hrefBySection: {}, inferredCurrent: null,
+    frameLoadedAt: 0, observedCurrent: '', switchKey: '', srcAtSwitch: '', docIdBySection: {}, hrefBySection: {}, inferredCurrent: null, catalogTimes: new Map(), catalogLoading: false,
     docId: Math.random().toString(36).slice(2) + Date.now().toString(36) };
   function read(storage, key, fallback) { try { return JSON.parse(storage.getItem(key)) || fallback; } catch (_) { return fallback; } }
   function write(storage, key, value) { try { storage.setItem(key, JSON.stringify(value)); return true; } catch (_) { return false; } }
@@ -42,7 +43,7 @@
     for (const key of ['minDwell', 'jitterMin', 'jitterMax']) if (typeof obj[key] === 'number' && Number.isFinite(obj[key])) C[key] = clamp(Math.round(obj[key]), 0, 86400);
     C.jitterMin = Math.min(C.jitterMin, C.jitterMax);
     if (typeof obj.enabled === 'boolean') C.enabled = obj.enabled;
-    if (obj.mode === 'duration' || obj.mode === 'completion') C.mode = obj.mode;
+    if (obj.mode === 'section' || obj.mode === 'duration' || obj.mode === 'completion') C.mode = obj.mode;
     if (typeof obj.autoAnswer === 'boolean') C.autoAnswer = obj.autoAnswer;
     if (typeof obj.muteMedia === 'boolean' && obj.muteMedia !== C.muteMedia) {
       C.muteMedia = obj.muteMedia;
@@ -64,6 +65,8 @@
     }
     if (!obj) { try { const i = W.name.indexOf('__WLAP_CFG__'); if (i >= 0) obj = JSON.parse(W.name.slice(i + '__WLAP_CFG__'.length)); } catch (_) {} }
     apply(obj);
+    // 升级后启用每节30分钟策略；保留旧停留参数，供手动切回旧模式使用。
+    if (!obj || obj.sectionPolicy !== 1) { C.mode = 'section'; write(LS, CONFIG, C); write(SS, CONFIG, C); }
     if (migrated) { C.autoAnswer = false; write(LS, CONFIG, C); write(SS, CONFIG, C); S.migrated = true; }
     S.total = Number(read(SS, TOTAL, 0)) || 0;
     S.records = read(LS, RECORDS, {}) || {};
@@ -100,6 +103,43 @@
   }
   function nextInfo() { const list = sections(), index = list.findIndex(item => item.id === current()); return { list, index, next: index >= 0 ? list[index + 1] || null : null }; }
   function nextButton() { return Array.from(document.querySelectorAll('a[href]')).find(el => /^javascript:\s*NextSCO\(\s*\)\s*;?$/i.test(el.getAttribute('href') || '')) || null; }
+  function catalogTime(item) {
+    if (!item) return null;
+    for (const el of item.querySelectorAll('span')) {
+      // 目录显示“用时 MM:SS”，也兼容 HH:MM:SS；不从小节标题猜时长。
+      const m = /^用时\s*(?:(\d+):)?(\d+):([0-5]\d)\s*$/.exec(label(el));
+      if (m && (m[1] == null || Number(m[2]) < 60)) return Number(m[1] || 0) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+    }
+    return null;
+  }
+  function syncCatalogTime() {
+    const inline = catalogTime(currentItem()), seconds = inline == null ? S.catalogTimes.get(current()) : inline;
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return false;
+    S.siteTime = '目录';
+    S.sectionElapsed = Math.max(S.sectionElapsed, Math.min(SECTION_LIMIT, seconds * 1000));
+    return true;
+  }
+  async function loadCatalogTimes() {
+    const params = new URLSearchParams(location.search), cid = params.get('cid');
+    if (!cid || !/^\d+$/.test(cid)) return;
+    const url = new URL('/student/course_info.aspx', location.origin);
+    url.searchParams.set('cid', cid);
+    if (params.get('classid')) url.searchParams.set('classid', params.get('classid'));
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 15000);
+    S.catalogLoading = true;
+    try {
+      // 只读课程目录，按 StartSCO 的小节 ID 对应“用时”，不执行返回页面的脚本。
+      const response = await fetch(url.href, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+      if (!response.ok) return;
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+      for (const item of doc.querySelectorAll('li[onclick*="StartSCO"]')) {
+        const id = /\bStartSCO\(\s*['"]([^'"]+)['"]\s*\)/.exec(item.getAttribute('onclick') || '');
+        const seconds = catalogTime(item);
+        if (id && seconds != null) S.catalogTimes.set(id[1], seconds);
+      }
+      syncCatalogTime();
+    } catch (_) {} finally { S.catalogLoading = false; clearTimeout(timer); }
+  }
   // Web Locks 跨标签页互斥，复制标签页也不能共用控制权。
   function own() {
     if (!TOP) return false;
@@ -109,6 +149,7 @@
         navigator.locks.request('welearn-autopager-v3', { ifAvailable: true }, async lock => {
           if (!lock) return;
           S.owner = true; S.lockError = ''; S.lastTick = Date.now();
+          S.sectionElapsed = Math.max(S.sectionElapsed, sectionTime(S.key));
           await new Promise(resolve => { S.release = resolve; });
           S.owner = false; S.release = null;
         }).catch(() => { S.owner = false; S.lockError = '互斥锁不可用，已停止操作'; }).finally(() => { S.pending = false; });
@@ -295,6 +336,21 @@
     }
     return '';
   }
+  // 只读网站已累计的时长；不读取/写入 session_time，也不调用计时或提交接口。
+  function siteStudySeconds() {
+    try {
+      const inj = injector(), api = inj && inj.get('apiService');
+      const value = api && api.get('cmi.total_time');
+      if (typeof value !== 'string' && typeof value !== 'number') return null;
+      const text = String(value).trim();
+      if (/^\d+(?:\.\d+)?$/.test(text)) return Number(text);
+      const iso = /^P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(text);
+      if (iso && iso.slice(1).some(v => v != null)) return Number(iso[1] || 0) * 86400 + Number(iso[2] || 0) * 3600 + Number(iso[3] || 0) * 60 + Number(iso[4] || 0);
+      const clock = /^(\d+):([0-5]\d):([0-5]\d(?:\.\d+)?)$/.exec(text);
+      if (clock) return Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3]);
+    } catch (_) {}
+    return null;
+  }
   function analyze() {
     if (!isCourseware()) return null;
     const item = findItem(); if (!item) return null;
@@ -326,10 +382,10 @@
     // 无交互页由课件 3 秒后自行 commit，控制器的 scormInfo 不会回填，按结构完成处理。
     if (!list.length && item.type === 'no_interaction') completion = 100;
     const accuracy = Math.round(Number(info.score && info.score.scaled) || 0);
-    const report = { page: route(), href: location.pathname + (location.hash || ''), docId: S.docId, itemId: item.id, type: item.type || '', submitted: !!item.isSubmitted, browse: !!item.isBrowseMode, endTab: !!item.isEndTab,
+    const report = { page: route(), href: location.pathname + location.search + (location.hash || ''), docId: S.docId, itemId: item.id, type: item.type || '', submitted: !!item.isSubmitted, browse: !!item.isBrowseMode, endTab: !!item.isEndTab,
       total: list.length, done: done, unknown: unknown, notscored: notscored, manual: unknown, voice: voice, completion: completion,
       accuracy: accuracy, raw: Number(info.score && info.score.raw) || 0, siteCompletion: siteCompletion, localCompletion: localCompletion, missing: missing.slice(0, 10),
-      error: E.error || '', minAccuracy: C.minAccuracy, issues: E.issues.length, at: Date.now() };
+      error: E.error || '', minAccuracy: C.minAccuracy, issues: E.issues.length, studySeconds: siteStudySeconds(), at: Date.now() };
     const reason = gateFor(report);
     report.blockReason = report.submitted ? '' : reason;
     report.canSubmit = !report.submitted && !reason;
@@ -548,7 +604,7 @@
   }
 
   // 供自动化测试与诊断使用；正式运行时同样可用。
-  W.__WLAP_ENGINE__ = { version: '3.3.4', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
+  W.__WLAP_ENGINE__ = { version: '3.3.5', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
     runPage: runPage, route: route, config: C, gate: gateFor, mediaCount: () => mediaEls().length,
     mediaState: () => mediaEls().map(e => ({ muted: !!e.muted, paused: !!e.paused, ended: !!e.ended })), state: () => ({ busy: E.busy, done: E.done, error: E.error, blockReason: E.blockReason, issues: E.issues, report: E.report, grant: S.grant, grantAt: S.grantAt }) };
 
@@ -588,6 +644,10 @@
             total: clamp(Number(p.total) || 0, 0, 1000), done: clamp(Number(p.done) || 0, 0, 1000), manual: clamp(Number(p.manual) || 0, 0, 1000), voice: clamp(Number(p.voice) || 0, 0, 1000),
             submitted: p.submitted === true, type: String(p.type || ''), error: String(p.error || ''), blockReason: String(p.blockReason || ''),
             minAccuracy: clamp(Math.round(Number(p.minAccuracy == null ? 100 : p.minAccuracy)), 0, 100), issues: clamp(Number(p.issues) || 0, 0, 1000), at: Date.now(), origin: event.origin };
+          if (!syncCatalogTime() && !S.catalogLoading && typeof p.studySeconds === 'number' && Number.isFinite(p.studySeconds) && p.studySeconds >= 0) {
+            S.siteTime = '课件';
+            S.sectionElapsed = Math.max(S.sectionElapsed, Math.min(SECTION_LIMIT, p.studySeconds * 1000));
+          }
           recordAuto(S.progress);
         }
       }
@@ -678,11 +738,25 @@
     return '网站尚未标记本节完成，请按课件要求完成并提交';
   }
   function reportParent() { if (S.parentOrigin && S.parentOrigin !== 'null') try { W.parent.postMessage({ protocol: PROTOCOL, type: 'status', media: summary(), warning: S.warning, progress: E.report }, S.parentOrigin); } catch (_) {} }
-  function saveDwell() { if (TOP) write(SS, 'wl_ap_dwell_v3', { key: S.key, elapsed: S.elapsed, jitter: S.jitter }); }
+  function sectionTime(key) {
+    const times = read(LS, SECTION_TIMES, {}), entry = times && times[key];
+    return entry && Number.isFinite(entry.elapsed) ? clamp(entry.elapsed, 0, SECTION_LIMIT) : 0;
+  }
+  function sectionFull() { return S.sectionElapsed >= SECTION_LIMIT; }
+  function saveDwell() {
+    if (!TOP) return;
+    write(SS, 'wl_ap_dwell_v3', { key: S.key, elapsed: S.elapsed, jitter: S.jitter });
+    if (!S.owner || !S.key || !current()) return;
+    const stored = read(LS, SECTION_TIMES, {}), times = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
+    const elapsed = Math.max(sectionTime(S.key), clamp(S.sectionElapsed, 0, SECTION_LIMIT));
+    times[S.key] = { elapsed: elapsed, at: Date.now() };
+    write(LS, SECTION_TIMES, times);
+  }
   function saveTotal() { if (TOP) write(SS, TOTAL, Math.round(S.total)); }
   // 同一次切换只初始化一次；先到的新进度不会被下一次 tick 再重置。
   function beginSectionSwitch(key, pending = S.awaiting) {
     if (!key || S.switchKey === key) return;
+    saveDwell();
     if (pending && current() !== pending.nextId) { S.awaiting = null; pending = null; }
     S.switchKey = key;
     const oldKey = S.key;
@@ -693,12 +767,20 @@
     S.sectionSwitching = true;
     S.progress = null;
     S.progressArmed = false;
-    S.key = key; S.elapsed = 0; S.jitter = jitter(); S.lastTick = Date.now();
+    S.key = key; S.elapsed = 0; S.sectionElapsed = sectionTime(key); S.siteTime = false; S.jitter = jitter(); S.lastTick = Date.now();
     saveDwell();
     broadcast();
   }
-  function reset(key = pageKey()) { S.key = key; S.elapsed = 0; S.jitter = jitter(); S.lastTick = Date.now(); S.progress = null; saveDwell(); }
-  function restore() { const d = read(SS, 'wl_ap_dwell_v3', null); if (d && d.key === S.key && Number.isFinite(d.elapsed) && d.elapsed >= 0) { S.elapsed = clamp(d.elapsed, 0, 86400000); if (Number.isFinite(d.jitter)) S.jitter = clamp(d.jitter, C.jitterMin, C.jitterMax); } }
+  function reset(key = pageKey()) { saveDwell(); S.key = key; S.elapsed = 0; S.sectionElapsed = sectionTime(key); S.siteTime = false; S.jitter = jitter(); S.lastTick = Date.now(); S.progress = null; saveDwell(); }
+  function restore() {
+    S.sectionElapsed = sectionTime(S.key);
+    const d = read(SS, 'wl_ap_dwell_v3', null);
+    if (d && d.key === S.key && Number.isFinite(d.elapsed) && d.elapsed >= 0) {
+      S.elapsed = clamp(d.elapsed, 0, 86400000);
+      S.sectionElapsed = Math.max(S.sectionElapsed, Math.min(SECTION_LIMIT, S.elapsed));
+      if (Number.isFinite(d.jitter)) S.jitter = clamp(d.jitter, C.jitterMin, C.jitterMax);
+    }
+  }
   function confirmNavigation(pending) {
     // 只有明确的新课件证据才使用预期下一节；不改网站目录/完成标记。
     const catalogId = catalogCurrent();
@@ -739,7 +821,7 @@
     if (info.index < 0) { S.paused = true; action('找不到当前目录小节，请重新进入课件'); broadcast(); return false; }
     if (!info.next) { S.stopped = true; action('已到课程末尾'); broadcast(); return false; }
     const voiceBypass = C.mode === 'completion' && !verifiedComplete() && voicePending();
-    if (C.mode === 'completion' && !verifiedComplete() && !voiceBypass) {
+    if (C.mode === 'completion' && !verifiedComplete() && !voiceBypass && !sectionFull()) {
       S.paused = true;
       S.awaitingCompletion = true;
       action(completionWaitText());
@@ -749,6 +831,7 @@
     if (!enabled(info.next.el)) { S.paused = true; action('下一小节未开放，请先完成当前要求'); broadcast(); return false; }
     const button = nextButton();
     if (!button || !visible(button) || !enabled(button)) { S.paused = true; action('网站下一节按钮不可用，请检查页面'); broadcast(); return false; }
+    saveDwell();
     S.clickedAt = Date.now();
     const currentFrame = frame();
     S.awaiting = { key: pageKey(), at: S.clickedAt, nextId: info.next.id, catalogId: catalogCurrent(),
@@ -765,13 +848,26 @@
   function tick() {
     const now = Date.now(), delta = now - S.lastTick; S.lastTick = now; check();
     if (!TOP) { if (granted()) play(); engineTick(); refreshProgress(); broadcast(); reportParent(); return; } // 子框架永远不导航。
-    own(); bindFrame(); const key = pageKey(); if (key !== S.key) beginSectionSwitch(key); recordVerified(); broadcast();
+    own(); bindFrame(); const key = pageKey(); if (key !== S.key) beginSectionSwitch(key); syncCatalogTime(); recordVerified(); broadcast();
     if (!C.enabled) { action('已关闭'); return; }
     if (!S.owner) { action(S.lockError || '其他标签页正在控制，当前页待命'); return; }
     // 本地学习时长独立累计：等待完成、自动作答的时间也计入，但系统睡眠的大间隔不计入。
     if (delta >= 0 && delta <= 15000) { S.total += delta / 1000; }
     if (now - S.totalSavedAt > 5000) { S.totalSavedAt = now; saveTotal(); }
     if (S.warning || S.stopped) { paint(); return; }
+    if (S.userPaused || (S.paused && !S.awaitingCompletion)) { paint(); return; }
+    if (S.awaiting) { if (now - S.awaiting.at > 30000) { S.awaiting.timedOut = true; S.paused = true; S.userPaused = true; action('30秒内未确认课件加载，已暂停；不会补点'); broadcast(); } return; }
+    if (S.busy) { action('等待课件加载'); return; }
+    if (S.sectionSwitching) { action('等待新课件加载确认'); return; }
+    if (S.catalogLoading) { action('读取目录用时'); return; }
+    if ((Number(stats().clicks) || 0) >= C.maxPages) { S.stopped = true; action('已达到本标签页翻页上限'); broadcast(); return; }
+    // 只计控制中的有效停留；加载、人工暂停、系统睡眠/冻结均不补算。
+    if (delta >= 0 && delta <= 15000) { S.elapsed += delta; S.sectionElapsed = Math.min(SECTION_LIMIT, S.sectionElapsed + delta); }
+    if (now - S.savedAt > 5000) { S.savedAt = now; saveDwell(); }
+    if (sectionFull()) {
+      S.awaitingCompletion = false; S.paused = false;
+      action('本节累计已满30分钟，切换下一节'); next(); return;
+    }
     if (S.awaitingCompletion) {
       if (S.userPaused) { paint(); return; }
       if (verifiedComplete() || voicePending()) {
@@ -781,13 +877,8 @@
       } else { action(completionWaitText()); paint(); return; }
     }
     if (S.paused) { paint(); return; }
-    if (S.awaiting) { if (now - S.awaiting.at > 30000) { S.awaiting.timedOut = true; S.paused = true; S.userPaused = true; action('30秒内未确认课件加载，已暂停；不会补点'); broadcast(); } return; }
-    if (S.busy) { action('等待课件加载'); return; }
-    if (S.sectionSwitching) { action('等待新课件加载确认'); return; }
-    if ((Number(stats().clicks) || 0) >= C.maxPages) { S.stopped = true; action('已达到本标签页翻页上限'); broadcast(); return; }
-    // 系统睡眠、后台冻结的整段间隔不计入停留，不修改平台活动检测或心跳。
-    if (delta >= 0 && delta <= 15000) S.elapsed += delta;
-    play(); S.media = summary(); if (now - S.savedAt > 5000) { S.savedAt = now; saveDwell(); }
+    play(); S.media = summary();
+    if (C.mode === 'section') { action('本节累计 ' + fmt(S.sectionElapsed / 1000) + ' / 30分钟，满时切换'); return; }
     if (S.elapsed / 1000 < C.minDwell + S.jitter) { action('停留 ' + fmt(S.elapsed / 1000) + ' / ' + fmt(C.minDwell + S.jitter)); return; }
     if (!voicePending()) {
       if (!S.media.ready) { action('等待课件脚本回执，暂不翻页'); return; }
@@ -801,7 +892,7 @@
     if (!own()) { action(S.lockError || '另一标签页正在运行，请先关闭那一页'); return; }
     S.warning = ''; S.paused = false; S.stopped = false; S.userPaused = false; S.awaitingCompletion = false;
     if (S.awaiting && S.awaiting.timedOut) { S.awaiting.at = Date.now(); S.awaiting.timedOut = false; }
-    if (!verifiedComplete() && C.mode === 'completion') S.awaitingCompletion = true;
+    if (!verifiedComplete() && C.mode === 'completion' && !sectionFull()) S.awaitingCompletion = true;
     S.lastTick = Date.now();
     for (const el of mediaEls()) delete el.dataset.wlPlayFailed;
     saveConfig(); action('已继续');
@@ -835,33 +926,34 @@
     const a = S.progress, rec = recordStats();
     const ahead = !!(a && a.siteCompletion != null && a.localCompletion != null && a.localCompletion > a.siteCompletion);
     S.status.textContent = ['状态：' + (!C.enabled ? '已关闭' : S.warning ? '网站提示，已暂停' : !S.owner ? '等待控制权' : S.stopped ? '已结束' : S.paused ? (S.awaitingCompletion ? '等待本节完成' : '已暂停') : '运行中'),
-      '模式：' + (C.mode === 'completion' ? '完成度模式（需网站标记完成）' : '时长模式'),
+      '模式：' + (C.mode === 'section' ? '每节30分钟（已满自动跳过）' : C.mode === 'completion' ? '完成度模式（满30分钟也切换）' : '时长模式（上限30分钟）'),
       '当前：' + (info.index >= 0 ? (info.index + 1) + '/' + info.list.length + ' ' + label(info.list[info.index].el) : '等待目录'),
       '完成度：' + (a && a.total > 0 ? a.completion + '%（' + a.done + '/' + a.total + ' 项' + (a.manual ? '，' + a.manual + ' 项需人工' : '') + (ahead ? '，网站仍记录 ' + a.siteCompletion + '%' : '') + '）' : completed(currentItem()) ? '网站已标记完成' : '等待课件'),
       '正确率：' + (a ? a.accuracy + '%' + (a.type === 'objective' ? '（要求 ≥' + a.minAccuracy + '%）' : '') : '—'),
       '人工语音：' + (a && a.voice > 0 ? a.voice + ' 项，按停留时长放行（不要求完成度）' : '—'),
       '学习时长：本页 ' + fmt(S.elapsed / 1000) + ' · 本地累计 ' + fmt(S.total),
+      '本节累计：' + fmt(S.sectionElapsed / 1000) + ' / 30分钟（' + (S.siteTime ? '参考网站' + S.siteTime + '用时 + 本地计时' : '本机计时') + '）',
       '自动作答：' + (!C.autoAnswer ? '关闭' : !a ? '等待课件' : a.submitted ? '已提交' : a.total > 0 ? '已填 ' + a.done + '/' + a.total + (a.manual ? '，待人工 ' + a.manual : '') + (a.blockReason ? '，已拦截：' + a.blockReason : '') + (a.error ? '（' + a.error + '）' : '') : '无交互题'),
       '记录：' + rec.count + ' 节 · 平均正确率 ' + rec.accuracy + '%',
       '媒体：' + (!m.ready ? '等待回执' : m.count ? m.done ? '已播完' : m.blocked ? '等待播放' : '播放中' : '本页无音视频'),
       '翻页：本次 ' + S.clicks + '，累计 ' + (Number(stats().clicks) || 0), S.action, '实际学时由网站记录'].join('\n');
   }
   function buildHud() {
-    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.3.4'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
+    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.3.5'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
     hud.style.cssText = 'position:fixed;left:12px;top:12px;z-index:2147483647;width:330px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);box-sizing:border-box;background:rgba(19,24,32,.96);color:#edf1f7;border:1px solid #536278;border-radius:10px;box-shadow:0 5px 22px #0006;font:13px/1.6 system-ui,sans-serif;overflow:hidden;';
     const bs = 'background:#2d3a4e;color:#edf1f7;border:1px solid #536278;border-radius:5px;padding:3px 8px;font:inherit;cursor:pointer';
-    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.3.4</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
+    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.3.5</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
       '<div style="padding:10px 12px;overflow-y:auto;max-height:calc(100vh - 80px);box-sizing:border-box"><div class="wl-ap-status" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>' +
-      '<label style="display:block;margin-top:8px">模式 <select aria-label="运行模式" class="wl-ap-mode" style="background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"><option value="duration">时长模式：停留并播放后翻页</option><option value="completion">完成度模式：仅网站标记完成后翻页</option></select></label>' +
+      '<label style="display:block;margin-top:8px">模式 <select aria-label="运行模式" class="wl-ap-mode" style="background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"><option value="section">每节30分钟：已满自动跳过</option><option value="duration">自定停留：上限30分钟</option><option value="completion">完成度：上限30分钟</option></select></label>' +
       '<label style="display:flex;gap:6px;align-items:center;margin-top:7px"><input type="checkbox" class="wl-ap-auto"> 自动作答（保留已填答案，默认关闭）</label>' +
       '<label style="display:flex;gap:6px;align-items:center;margin-top:5px"><input type="checkbox" class="wl-ap-mute"> 自动静音播放媒体</label>' +
-      '<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-top:8px"><label>停留 <input aria-label="每页停留" class="wl-ap-dwell" title="支持秒数、29m、1h" style="width:60px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label><label>随机≤ <input aria-label="随机停留上限" class="wl-ap-jit" style="width:45px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label><label>正确率≥ <input aria-label="自动提交最低正确率" class="wl-ap-min" title="0-100，默认100" style="width:42px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label></div>' +
+      '<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-top:8px"><label>自定停留 <input aria-label="每页停留" class="wl-ap-dwell" title="仅自定停留/完成度模式生效；支持秒数、29m、1h" style="width:60px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label><label>随机≤ <input aria-label="随机停留上限" class="wl-ap-jit" style="width:45px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label><label>正确率≥ <input aria-label="自动提交最低正确率" class="wl-ap-min" title="0-100，默认100" style="width:42px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label></div>' +
       '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:8px">' + [['apply','应用'],['pause','暂停'],['resume','继续'],['next','下一节'],['toggle','开/关']].map(([act,text]) => '<button data-act="' + act + '" style="' + bs + '">' + text + '</button>').join('') +
       '</div><div style="color:#b4c2d5;font-size:11px;margin-top:7px">拖动标题栏移动 · 回车保存时间<br>Ctrl+Alt+S 暂停/继续 · Ctrl+Alt+A 开关</div></div>';
     document.documentElement.appendChild(hud); S.hud = hud; S.status = hud.querySelector('.wl-ap-status'); S.dwell = hud.querySelector('.wl-ap-dwell'); S.extra = hud.querySelector('.wl-ap-jit'); S.mode = hud.querySelector('.wl-ap-mode'); S.autoBox = hud.querySelector('.wl-ap-auto'); S.muteBox = hud.querySelector('.wl-ap-mute'); S.min = hud.querySelector('.wl-ap-min');
     const actions = { reset: resetPosition, apply: setDwell, pause, resume, next: () => next(true), toggle };
     hud.addEventListener('click', e => { const b = e.target.closest('button[data-act]'); if (b) actions[b.dataset.act](); });
-    S.mode.addEventListener('change', () => { C.mode = S.mode.value === 'completion' ? 'completion' : 'duration'; S.awaitingCompletion = false; S.paused = false; S.userPaused = false; saveConfig(); S.lastTick = Date.now(); action(C.mode === 'completion' ? '已切换到完成度模式' : '已切换到时长模式'); });
+    S.mode.addEventListener('change', () => { C.mode = ['section', 'completion', 'duration'].includes(S.mode.value) ? S.mode.value : 'section'; S.awaitingCompletion = false; S.paused = false; S.userPaused = false; saveConfig(); S.lastTick = Date.now(); action(C.mode === 'section' ? '已启用每节30分钟，已满自动跳过' : C.mode === 'completion' ? '已切换到完成度模式' : '已切换到时长模式'); });
     S.autoBox.addEventListener('change', () => { C.autoAnswer = S.autoBox.checked; saveConfig(); action(C.autoAnswer ? '已开启自动作答' : '已关闭自动作答'); });
     S.muteBox.addEventListener('change', () => { C.muteMedia = S.muteBox.checked; setMuted(C.muteMedia); saveConfig(); action(C.muteMedia ? '已开启静音自动播放' : '已关闭静音自动播放'); });
     for (const input of [S.dwell, S.extra, S.min]) input.addEventListener('keydown', e => { if (e.key === 'Enter') { setDwell(); input.blur(); e.stopPropagation(); } });
@@ -892,7 +984,7 @@
   function boot() {
     load(); if (TOP && !(/\/student\/studycourse\.aspx$/i.test(location.pathname) && frame())) return;
     messages(); observeDialogs();
-    if (TOP) { S.key = pageKey(); S.jitter = jitter(); restore(); bindFrame(); document.addEventListener('load', e => frameLoaded(e.target), true); own(); check(); buildHud(); observeCatalog(); if (S.migrated) action('已迁移旧设置：自动作答已关闭，请按需手动开启'); keys(); W.addEventListener('pagehide', () => { saveDwell(); saveTotal(); release(); }); W.addEventListener('pageshow', () => { S.lastTick = Date.now(); own(); }); document.addEventListener('visibilitychange', saveDwell); }
+    if (TOP) { S.key = pageKey(); S.jitter = jitter(); restore(); bindFrame(); document.addEventListener('load', e => frameLoaded(e.target), true); own(); check(); buildHud(); observeCatalog(); loadCatalogTimes(); if (S.migrated) action('已迁移旧设置：自动作答已关闭，请按需手动开启'); keys(); W.addEventListener('pagehide', () => { saveDwell(); saveTotal(); release(); }); W.addEventListener('pageshow', () => { S.lastTick = Date.now(); own(); }); document.addEventListener('visibilitychange', saveDwell); }
     else if (S.parentOrigin && S.parentOrigin !== 'null') W.parent.postMessage({ protocol: PROTOCOL, type: 'request' }, S.parentOrigin);
     setInterval(tick, 1000); tick();
   }

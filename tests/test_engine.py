@@ -86,7 +86,7 @@ def run_all():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context(viewport={"width": 1440, "height": 1000})
-        # --- fresh install: duration mode and auto-answer off by default ---
+        # --- fresh install: 30-minute section mode and auto-answer off by default ---
         entry = {"case": "default-config-off", "sco": "4/7-2", "pass": False, "notes": []}
         page = new_page(ctx)
         try:
@@ -97,7 +97,7 @@ def run_all():
             entry["config"] = cfg
             entry["after"] = {k: after.get(k) for k in ("submitted", "completion", "accuracy")}
             entry["blank_value"] = value
-            entry["pass"] = cfg.get("auto") is False and cfg.get("mode") == "duration" and cfg.get("minAccuracy") == 100 and value == "" and after.get("submitted") is False
+            entry["pass"] = cfg.get("auto") is False and cfg.get("mode") == "section" and cfg.get("minAccuracy") == 100 and value == "" and after.get("submitted") is False
         except Exception as e:
             entry["notes"].append(repr(e)[:300])
         finally:
@@ -291,12 +291,12 @@ def run_all():
         results.append(entry)
         print(json.dumps(entry, ensure_ascii=False))
 
-        # --- 3.2.0 旧配置迁移：保留停留/模式，但自动作答强制关闭 ---
+        # --- 3.2.0 旧配置迁移：保留停留参数、启用30分钟模式，自动作答强制关闭 ---
         entry = {"case": "legacy-config-migration", "sco": "4/7-2", "pass": False, "notes": []}
         page = ctx.new_page()
         page.add_init_script(STUB)
         page.add_init_script("try { Object.keys(localStorage).filter(k => k.indexOf('autosave-') === 0).forEach(k => localStorage.removeItem(k)); } catch (e) {}")
-        page.add_init_script("try { localStorage.setItem('wl_autopager_cfg_v6', JSON.stringify({enabled:true,minDwell:33,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:true})); } catch (e) {}")
+        page.add_init_script("try { localStorage.removeItem('wl_autopager_cfg_v7'); sessionStorage.removeItem('wl_autopager_cfg_v7'); localStorage.setItem('wl_autopager_cfg_v6', JSON.stringify({enabled:true,minDwell:33,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:true})); } catch (e) {}")
         page.add_init_script(SCRIPT)
         try:
             load(page, "4/7-2", auto=False)
@@ -307,7 +307,7 @@ def run_all():
             entry["config"] = cfg
             entry["stored_auto"] = stored.get("autoAnswer")
             entry["blank_value"] = value
-            entry["pass"] = (cfg.get("auto") is False and cfg.get("dwell") == 33 and cfg.get("mode") == "completion"
+            entry["pass"] = (cfg.get("auto") is False and cfg.get("dwell") == 33 and cfg.get("mode") == "section"
                              and stored.get("autoAnswer") is False and value == "" and after.get("submitted") is False)
         except Exception as e:
             entry["notes"].append(repr(e)[:300])

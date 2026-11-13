@@ -102,7 +102,7 @@ def main():
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.add_init_script(STUB)
         page.add_init_script(
-            "try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:1,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:true})); } catch (e) {}")
+            "try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:1,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:true})); } catch (e) {}")
         page.add_init_script(SCRIPT)
 
         def serve(route):
@@ -162,7 +162,7 @@ def main():
         page2.on("pageerror", lambda e: errors2.append(str(e)))
         page2.add_init_script(STUB)
         page2.add_init_script(
-            "try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:1,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
+            "try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:1,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
         page2.add_init_script(SCRIPT)
         page2.route("https://welearn.sflep.com/Student/StudyCourse.aspx*", serve)
         page2.goto("https://welearn.sflep.com/Student/StudyCourse.aspx?cid=fixture2", wait_until="domcontentloaded", timeout=90000)
@@ -212,7 +212,7 @@ def main():
         # This case tests submission gates, not navigation.  TOP_HTML's next
         # handler is a no-op; keep it from revoking the grant before we assert.
         page3.add_init_script(
-            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:300,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
+            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:300,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
         page3.add_init_script(SCRIPT)
         page3.route("https://welearn.sflep.com/Student/StudyCourse.aspx*",
                     lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",
@@ -258,7 +258,7 @@ def main():
         page4.on("pageerror", lambda e: errors4.append(str(e)))
         page4.add_init_script(STUB)
         page4.add_init_script(
-            "try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:300,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:true,minAccuracy:100})); } catch (e) {}")
+            "try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:300,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:true,minAccuracy:100})); } catch (e) {}")
         page4.add_init_script(SCRIPT)
         page4.route("https://welearn.sflep.com/Student/StudyCourse.aspx*",
                     lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",
@@ -298,7 +298,7 @@ def main():
         page5.on("pageerror", lambda e: errors5.append(str(e)))
         page5.add_init_script(STUB)
         page5.add_init_script(
-            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:1,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
+            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:1,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
         page5.add_init_script(SCRIPT)
         page5.route("https://welearn.sflep.com/Student/StudyCourse.aspx*",
                     lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",
@@ -339,7 +339,7 @@ def main():
         page6.on("pageerror", lambda e: errors6.append(str(e)))
         page6.add_init_script(STUB)
         page6.add_init_script(
-            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:60,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:true,minAccuracy:100})); } catch (e) {}")
+            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:60,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:true,minAccuracy:100})); } catch (e) {}")
         page6.add_init_script(SCRIPT)
         page6.route("https://welearn.sflep.com/Student/StudyCourse.aspx*",
                     lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",
@@ -392,7 +392,7 @@ def main():
         page7.on("pageerror", lambda e: errors7.append(str(e)))
         page7.add_init_script(STUB)
         page7.add_init_script(
-            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:1,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:true,minAccuracy:100})); } catch (e) {}")
+            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:1,jitterMin:0,jitterMax:0,maxPages:10,mode:'completion',autoAnswer:true,minAccuracy:100})); } catch (e) {}")
         page7.add_init_script(SCRIPT)
         page7.route("https://welearn.sflep.com/Student/StudyCourse.aspx*",
                     lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",
@@ -447,7 +447,7 @@ def main():
         page8.on("pageerror", lambda e: errors8.append(str(e)))
         page8.add_init_script(STUB)
         page8.add_init_script(
-            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:60,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
+            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:60,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
         page8.add_init_script(SCRIPT)
         page8.route("https://welearn.sflep.com/Student/StudyCourse.aspx*",
                     lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",
@@ -494,7 +494,7 @@ def main():
             pg = ctx.new_page()
             pg.add_init_script(STUB)
             pg.add_init_script(
-                "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:60,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
+                "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:60,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
             pg.add_init_script(SCRIPT)
             pg.route("https://welearn.sflep.com/Student/StudyCourse.aspx*",
                      lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",

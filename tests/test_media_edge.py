@@ -40,9 +40,9 @@ FAKE_MEDIA_HTML = ("<!DOCTYPE html><html><body>"
                    "<script>const r=document.getElementById('shadowHost').attachShadow({mode:'open'});"
                    "r.innerHTML='<audio src=\"data:audio/wav;base64," + _WAV + "\"></audio>';</script>"
                    "</body></html>")
-CONFIG_REAL = ("try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:300,jitterMin:0,jitterMax:0,"
+CONFIG_REAL = ("try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:300,jitterMin:0,jitterMax:0,"
                "maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100,muteMedia:true})); } catch (e) {}")
-CONFIG_END = ("try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:1,jitterMin:0,jitterMax:0,"
+CONFIG_END = ("try { localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({sectionPolicy:1,enabled:true,minDwell:1,jitterMin:0,jitterMax:0,"
               "maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100,muteMedia:true})); } catch (e) {}")
 MEDIA_EVENTS = """window.__MEDIA_LOG__ = [];
 for (const type of ['play', 'ended']) document.addEventListener(type, event => {

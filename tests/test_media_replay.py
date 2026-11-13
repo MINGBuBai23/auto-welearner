@@ -17,7 +17,7 @@ from test_media_edge import silent_wav
 
 CONFIG = """localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({
   enabled:true, minDwell:6, jitterMin:0, jitterMax:0, maxPages:10,
-  mode:'duration', autoAnswer:false, muteMedia:true
+  mode:'duration', sectionPolicy:1, autoAnswer:false, muteMedia:true
 }));"""
 HTML = """<!doctype html><html><body><et-item><et-media><audio></audio></et-media></et-item><div id="shadow"></div>
 <script>
