@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WE Learn 自动挂机翻页
 // @namespace    local.welearn.autopager
-// @version      3.3.3
+// @version      3.3.4
 // @description  单标签页按时翻页、媒体播放、自动作答与完成度核算；可选择仅在网站标记完成后翻页
 // @match        https://welearn.sflep.com/*
 // @match        https://*.sflep.com/*
@@ -29,7 +29,7 @@
     media: { count: 0, done: true, ready: true, playing: false, blocked: false }, hud: null, position: null, dragging: false,
     awaitingCompletion: false, autoBox: null, muteBox: null, progress: null, total: 0, records: {}, userPaused: false, totalSavedAt: 0, migrated: false,
     progressArmed: true, lastDocId: '', lastHref: '', oldDocId: '', oldHref: '', sectionSwitching: false, sectionChangedAt: 0,
-    frameLoadedAt: 0, observedCurrent: '', switchKey: '', srcAtSwitch: '', docIdBySection: {}, hrefBySection: {},
+    frameLoadedAt: 0, observedCurrent: '', switchKey: '', srcAtSwitch: '', docIdBySection: {}, hrefBySection: {}, inferredCurrent: null,
     docId: Math.random().toString(36).slice(2) + Date.now().toString(36) };
   function read(storage, key, fallback) { try { return JSON.parse(storage.getItem(key)) || fallback; } catch (_) { return fallback; } }
   function write(storage, key, value) { try { storage.setItem(key, JSON.stringify(value)); return true; } catch (_) { return false; } }
@@ -80,7 +80,17 @@
   function action(text) { S.action = text; paint(); }
   function frame() { return document.querySelector('#contentFrame'); }
   // URL 的 sco 在原生页内翻页后可能不变，以目录选中项为准。
-  function current() { const el = document.querySelector('.courseware_current[id^="liSCO_"],.course_current[id^="liSCO_"]'); return el ? el.id.slice(6) : new URLSearchParams(location.search).get('sco') || ''; }
+  function catalogCurrent() {
+    const mark = document.querySelector('li[id^="liSCO_"].courseware_current,li[id^="liSCO_"].course_current,li[id^="liSCO_"] .courseware_current,li[id^="liSCO_"] .course_current');
+    const el = mark && mark.closest('li[id^="liSCO_"]');
+    return el ? el.id.slice(6) : new URLSearchParams(location.search).get('sco') || '';
+  }
+  function current() {
+    const id = catalogCurrent(), inferred = S.inferredCurrent;
+    if (inferred && id === inferred.catalogId) return inferred.id;
+    S.inferredCurrent = null;
+    return id;
+  }
   function pageKey() { return location.pathname.toLowerCase() + '|' + (new URLSearchParams(location.search).get('cid') || '') + '|' + current(); }
   function sections() {
     return Array.from(document.querySelectorAll('li[id^="liSCO_"]'))
@@ -538,7 +548,7 @@
   }
 
   // 供自动化测试与诊断使用；正式运行时同样可用。
-  W.__WLAP_ENGINE__ = { version: '3.3.3', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
+  W.__WLAP_ENGINE__ = { version: '3.3.4', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
     runPage: runPage, route: route, config: C, gate: gateFor, mediaCount: () => mediaEls().length,
     mediaState: () => mediaEls().map(e => ({ muted: !!e.muted, paused: !!e.paused, ended: !!e.ended })), state: () => ({ busy: E.busy, done: E.done, error: E.error, blockReason: E.blockReason, issues: E.issues, report: E.report, grant: S.grant, grantAt: S.grantAt }) };
 
@@ -587,7 +597,17 @@
   function acceptProgress(p) {
     const docId = String(p.docId || '');
     const href = String(p.href || '');
+    if (S.awaiting) {
+      // 点击前保存身份；迟到首报、原地重载和旧报告都不能当成翻页成功。
+      const pending = S.awaiting;
+      const srcNow = frame() ? (frame().getAttribute('src') || '') : '';
+      const movedHref = !!pending.href && !!href && href !== pending.href;
+      const freshDoc = !!pending.docId && !!docId && docId !== pending.docId && srcNow !== pending.src;
+      if (!movedHref && !freshDoc) return false;
+      confirmNavigation(pending);
+    }
     if (S.sectionSwitching) {
+      if (S.oldDocId && docId === S.oldDocId && href === S.oldHref) return false;
       const srcNow = frame() ? (frame().getAttribute('src') || '') : '';
       const srcChanged = srcNow !== S.srcAtSwitch;
       const hasOld = !!(S.oldDocId || S.oldHref);
@@ -614,7 +634,7 @@
   }
   function recordAuto(a) {
     // 只有引擎确认提交成功的小节才记入历史；被闸门拦截的 100% 不算提交。
-    if (!TOP || !a || a.submitted !== true) return;
+    if (!TOP || !a || a.submitted !== true || S.awaiting || S.sectionSwitching) return;
     const key = pageKey();
     const old = S.records[key];
     if (old && old.completion === a.completion && old.accuracy === a.accuracy && old.submitted === true) return;
@@ -624,7 +644,7 @@
   }
   // 目录出现 course_disable 是可验证的网站完成标记；无交互/et-checking 页只能等这个标记。
   function recordVerified() {
-    if (!TOP || !completed(currentItem())) return;
+    if (!TOP || S.awaiting || S.sectionSwitching || !completed(currentItem())) return;
     const a = S.progress;
     if (!a || Date.now() - a.at > 15000 || Number(a.completion) < 100) return;
     const key = pageKey();
@@ -661,16 +681,16 @@
   function saveDwell() { if (TOP) write(SS, 'wl_ap_dwell_v3', { key: S.key, elapsed: S.elapsed, jitter: S.jitter }); }
   function saveTotal() { if (TOP) write(SS, TOTAL, Math.round(S.total)); }
   // 同一次切换只初始化一次；先到的新进度不会被下一次 tick 再重置。
-  function beginSectionSwitch(key) {
+  function beginSectionSwitch(key, pending = S.awaiting) {
     if (!key || S.switchKey === key) return;
+    if (pending && current() !== pending.nextId) { S.awaiting = null; pending = null; }
     S.switchKey = key;
     const oldKey = S.key;
-    S.oldDocId = S.lastDocId || S.docIdBySection[oldKey] || '';
-    S.oldHref = S.lastHref || S.hrefBySection[oldKey] || '';
-    S.srcAtSwitch = frame() ? (frame().getAttribute('src') || '') : '';
-    S.sectionChangedAt = Date.now();
+    S.oldDocId = pending ? pending.docId : S.lastDocId || S.docIdBySection[oldKey] || '';
+    S.oldHref = pending ? pending.href : S.lastHref || S.hrefBySection[oldKey] || '';
+    S.srcAtSwitch = pending ? pending.src : frame() ? (frame().getAttribute('src') || '') : '';
+    S.sectionChangedAt = pending ? pending.at : Date.now();
     S.sectionSwitching = true;
-    S.awaiting = null;
     S.progress = null;
     S.progressArmed = false;
     S.key = key; S.elapsed = 0; S.jitter = jitter(); S.lastTick = Date.now();
@@ -679,17 +699,41 @@
   }
   function reset(key = pageKey()) { S.key = key; S.elapsed = 0; S.jitter = jitter(); S.lastTick = Date.now(); S.progress = null; saveDwell(); }
   function restore() { const d = read(SS, 'wl_ap_dwell_v3', null); if (d && d.key === S.key && Number.isFinite(d.elapsed) && d.elapsed >= 0) { S.elapsed = clamp(d.elapsed, 0, 86400000); if (Number.isFinite(d.jitter)) S.jitter = clamp(d.jitter, C.jitterMin, C.jitterMax); } }
+  function confirmNavigation(pending) {
+    // 只有明确的新课件证据才使用预期下一节；不改网站目录/完成标记。
+    const catalogId = catalogCurrent();
+    if (catalogId === pending.catalogId) S.inferredCurrent = { id: pending.nextId, catalogId: catalogId };
+    S.awaiting = null;
+    beginSectionSwitch(pageKey(), pending);
+    S.busy = false;
+    action('已确认新课件加载');
+  }
+  function frameLoaded(el) {
+    if (el !== frame()) return;
+    bindFrame();
+    S.busy = false; S.reports.clear(); S.progress = null; S.frameLoadedAt = Date.now();
+    const pending = S.awaiting;
+    if (pending && (el.getAttribute('src') || '') !== pending.src) confirmNavigation(pending);
+    S.lastTick = Date.now();
+    broadcast();
+  }
   function bindFrame() {
     const el = frame(); if (!el || el === S.frame) return;
     if (S.observer) S.observer.disconnect(); S.frame = el; S.src = el.getAttribute('src') || '';
-    el.addEventListener('load', () => { if (el !== frame()) return; S.busy = false; S.reports.clear(); S.progress = null; S.progressArmed = true; S.frameLoadedAt = Date.now(); const pk = pageKey(); if (S.awaiting && pk !== S.awaiting.key) { S.awaiting = null; beginSectionSwitch(pk); } else S.lastTick = Date.now(); broadcast(); });
-    S.observer = new MutationObserver(() => { const src = el.getAttribute('src') || ''; if (src === S.src) return; S.src = src; S.busy = true; S.reports.clear(); S.progress = null; S.progressArmed = false; reset(); broadcast(); });
+    S.observer = new MutationObserver(() => {
+      const src = el.getAttribute('src') || '';
+      if (src === S.src) return;
+      S.src = src;
+      S.busy = true; S.reports.clear(); S.progress = null; S.progressArmed = false;
+      if (!S.awaiting && !S.sectionSwitching) reset();
+      broadcast();
+    });
     S.observer.observe(el, { attributes: true, attributeFilter: ['src'] });
   }
   function stats() { return read(SS, 'wl_ap_stats_v3', { clicks: 0 }); }
   function next(manual = false) {
     check();
-    if (!own() || !running() || S.awaiting || S.busy) { action(S.warning || S.lockError || (!S.owner ? '另一标签页持有控制权' : '请先继续，或等待课件加载')); return false; }
+    if (!own() || !running() || S.awaiting || S.busy || S.sectionSwitching) { action(S.warning || S.lockError || (!S.owner ? '另一标签页持有控制权' : '请先继续，或等待课件加载')); return false; }
     if (Date.now() - S.clickedAt < 2500) return false;
     const info = nextInfo();
     if (info.index < 0) { S.paused = true; action('找不到当前目录小节，请重新进入课件'); broadcast(); return false; }
@@ -705,7 +749,13 @@
     if (!enabled(info.next.el)) { S.paused = true; action('下一小节未开放，请先完成当前要求'); broadcast(); return false; }
     const button = nextButton();
     if (!button || !visible(button) || !enabled(button)) { S.paused = true; action('网站下一节按钮不可用，请检查页面'); broadcast(); return false; }
-    S.clickedAt = Date.now(); S.awaiting = { key: pageKey(), at: Date.now() }; broadcast();
+    S.clickedAt = Date.now();
+    const currentFrame = frame();
+    S.awaiting = { key: pageKey(), at: S.clickedAt, nextId: info.next.id, catalogId: catalogCurrent(),
+      src: currentFrame ? (currentFrame.getAttribute('src') || '') : '',
+      docId: S.lastDocId || S.docIdBySection[pageKey()] || '',
+      href: S.lastHref || S.hrefBySection[pageKey()] || '' };
+    broadcast();
     try {
       button.click(); // 唯一导航入口，保留原生 EndSCO / SelectSCO / StartSCO 流程。
       S.clicks++; const count = stats(); count.clicks = (Number(count.clicks) || 0) + 1; write(SS, 'wl_ap_stats_v3', count);
@@ -731,8 +781,9 @@
       } else { action(completionWaitText()); paint(); return; }
     }
     if (S.paused) { paint(); return; }
-    if (S.awaiting) { if (now - S.awaiting.at > 30000) { S.awaiting = null; S.paused = true; action('30秒内未确认课件加载，已暂停；不会补点'); broadcast(); } return; }
+    if (S.awaiting) { if (now - S.awaiting.at > 30000) { S.awaiting.timedOut = true; S.paused = true; S.userPaused = true; action('30秒内未确认课件加载，已暂停；不会补点'); broadcast(); } return; }
     if (S.busy) { action('等待课件加载'); return; }
+    if (S.sectionSwitching) { action('等待新课件加载确认'); return; }
     if ((Number(stats().clicks) || 0) >= C.maxPages) { S.stopped = true; action('已达到本标签页翻页上限'); broadcast(); return; }
     // 系统睡眠、后台冻结的整段间隔不计入停留，不修改平台活动检测或心跳。
     if (delta >= 0 && delta <= 15000) S.elapsed += delta;
@@ -749,6 +800,7 @@
     if (S.reentry) { action('平台已结束本次学习，请返回课程后重新进入'); return; }
     if (!own()) { action(S.lockError || '另一标签页正在运行，请先关闭那一页'); return; }
     S.warning = ''; S.paused = false; S.stopped = false; S.userPaused = false; S.awaitingCompletion = false;
+    if (S.awaiting && S.awaiting.timedOut) { S.awaiting.at = Date.now(); S.awaiting.timedOut = false; }
     if (!verifiedComplete() && C.mode === 'completion') S.awaitingCompletion = true;
     S.lastTick = Date.now();
     for (const el of mediaEls()) delete el.dataset.wlPlayFailed;
@@ -795,10 +847,10 @@
       '翻页：本次 ' + S.clicks + '，累计 ' + (Number(stats().clicks) || 0), S.action, '实际学时由网站记录'].join('\n');
   }
   function buildHud() {
-    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.3.3'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
+    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.3.4'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
     hud.style.cssText = 'position:fixed;left:12px;top:12px;z-index:2147483647;width:330px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);box-sizing:border-box;background:rgba(19,24,32,.96);color:#edf1f7;border:1px solid #536278;border-radius:10px;box-shadow:0 5px 22px #0006;font:13px/1.6 system-ui,sans-serif;overflow:hidden;';
     const bs = 'background:#2d3a4e;color:#edf1f7;border:1px solid #536278;border-radius:5px;padding:3px 8px;font:inherit;cursor:pointer';
-    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.3.3</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
+    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.3.4</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
       '<div style="padding:10px 12px;overflow-y:auto;max-height:calc(100vh - 80px);box-sizing:border-box"><div class="wl-ap-status" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>' +
       '<label style="display:block;margin-top:8px">模式 <select aria-label="运行模式" class="wl-ap-mode" style="background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"><option value="duration">时长模式：停留并播放后翻页</option><option value="completion">完成度模式：仅网站标记完成后翻页</option></select></label>' +
       '<label style="display:flex;gap:6px;align-items:center;margin-top:7px"><input type="checkbox" class="wl-ap-auto"> 自动作答（保留已填答案，默认关闭）</label>' +
@@ -819,6 +871,15 @@
   function observeCatalog() {
     const first = document.querySelector('li[id^="liSCO_"]');
     if (!first || !first.parentElement || typeof MutationObserver !== 'function') return;
+    document.addEventListener('click', e => {
+      if (!S.inferredCurrent || !e.target.closest) return;
+      const item = itemFor(e.target.closest('a[onclick*="SelectSCO"]'));
+      if (!item) return;
+      // 目录标记仍停在旧节时，用户点击旧节也必须撤销新节授权。
+      S.inferredCurrent = { id: item.id.slice(6), catalogId: catalogCurrent() };
+      S.awaiting = null;
+      beginSectionSwitch(pageKey(), null);
+    }, true);
     S.observedCurrent = current();
     new MutationObserver(() => {
       const now = current();
@@ -831,7 +892,7 @@
   function boot() {
     load(); if (TOP && !(/\/student\/studycourse\.aspx$/i.test(location.pathname) && frame())) return;
     messages(); observeDialogs();
-    if (TOP) { S.key = pageKey(); S.jitter = jitter(); restore(); bindFrame(); own(); check(); buildHud(); observeCatalog(); if (S.migrated) action('已迁移旧设置：自动作答已关闭，请按需手动开启'); keys(); W.addEventListener('pagehide', () => { saveDwell(); saveTotal(); release(); }); W.addEventListener('pageshow', () => { S.lastTick = Date.now(); own(); }); document.addEventListener('visibilitychange', saveDwell); }
+    if (TOP) { S.key = pageKey(); S.jitter = jitter(); restore(); bindFrame(); document.addEventListener('load', e => frameLoaded(e.target), true); own(); check(); buildHud(); observeCatalog(); if (S.migrated) action('已迁移旧设置：自动作答已关闭，请按需手动开启'); keys(); W.addEventListener('pagehide', () => { saveDwell(); saveTotal(); release(); }); W.addEventListener('pageshow', () => { S.lastTick = Date.now(); own(); }); document.addEventListener('visibilitychange', saveDwell); }
     else if (S.parentOrigin && S.parentOrigin !== 'null') W.parent.postMessage({ protocol: PROTOCOL, type: 'request' }, S.parentOrigin);
     setInterval(tick, 1000); tick();
   }

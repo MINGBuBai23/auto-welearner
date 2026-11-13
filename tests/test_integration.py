@@ -209,8 +209,10 @@ def main():
         errors3 = []
         page3.on("pageerror", lambda e: errors3.append(str(e)))
         page3.add_init_script(STUB)
+        # This case tests submission gates, not navigation.  TOP_HTML's next
+        # handler is a no-op; keep it from revoking the grant before we assert.
         page3.add_init_script(
-            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:1,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
+            "try { localStorage.removeItem('wl_ap_records_v32'); localStorage.setItem('wl_autopager_cfg_v7', JSON.stringify({enabled:true,minDwell:300,jitterMin:0,jitterMax:0,maxPages:10,mode:'duration',autoAnswer:false,minAccuracy:100})); } catch (e) {}")
         page3.add_init_script(SCRIPT)
         page3.route("https://welearn.sflep.com/Student/StudyCourse.aspx*",
                     lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",
