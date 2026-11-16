@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WE Learn 自动挂机翻页
 // @namespace    local.welearn.autopager
-// @version      3.3.6
-// @description  单标签页自动识别每节学时并在30分钟检测前翻页；支持媒体播放、自动作答与完成度核算
+// @version      3.3.7
+// @description  单标签页自动识别每节学时，累计29分钟翻页；支持媒体播放、自动作答与完成度核算
 // @match        https://welearn.sflep.com/*
 // @match        https://*.sflep.com/*
 // @match        https://*.sflep.cn/*
@@ -19,7 +19,7 @@
   const TOP = W.top === W, HUD = 'wl-ap-hud', CONFIG = 'wl_autopager_cfg_v7', LEGACY_CONFIG = 'wl_autopager_cfg_v6';
   const POS = 'wl_ap_hud_position_v1', PROTOCOL = 'wl-ap-v4';
   const RECORDS = 'wl_ap_records_v32', TOTAL = 'wl_ap_total_v32';
-  const SECTION_TIMES = 'wl_ap_section_times_v1', SECTION_LIMIT = 30 * 60 * 1000, SECTION_PREEMPT = 10 * 1000;
+  const SECTION_TIMES = 'wl_ap_section_times_v1', SECTION_LIMIT = 30 * 60 * 1000, SECTION_PREEMPT = 60 * 1000;
   function storage(name) { try { return W[name]; } catch (_) { return null; } }
   const LS = storage('localStorage'), SS = storage('sessionStorage');
   const C = { enabled: true, minDwell: 20, jitterMin: 0, jitterMax: 9, maxPages: 300, mode: 'section', sectionPolicy: 1, autoAnswer: false, minAccuracy: 100, muteMedia: true };
@@ -64,7 +64,7 @@
     }
     if (!obj) { try { const i = W.name.indexOf('__WLAP_CFG__'); if (i >= 0) obj = JSON.parse(W.name.slice(i + '__WLAP_CFG__'.length)); } catch (_) {} }
     apply(obj);
-    // 升级后启用每节30分钟策略；保留旧停留参数，供手动切回旧模式使用。
+    // 升级后启用自动分节计时；旧停留参数仅保留作兼容。
     if (!obj || obj.sectionPolicy !== 1) { C.mode = 'section'; write(LS, CONFIG, C); write(SS, CONFIG, C); }
     if (migrated) { C.autoAnswer = false; write(LS, CONFIG, C); write(SS, CONFIG, C); S.migrated = true; }
     S.total = Number(read(SS, TOTAL, 0)) || 0;
@@ -608,7 +608,7 @@
   }
 
   // 供自动化测试与诊断使用；正式运行时同样可用。
-  W.__WLAP_ENGINE__ = { version: '3.3.6', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
+  W.__WLAP_ENGINE__ = { version: '3.3.7', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
     runPage: runPage, route: route, config: C, gate: gateFor, mediaCount: () => mediaEls().length,
     mediaState: () => mediaEls().map(e => ({ muted: !!e.muted, paused: !!e.paused, ended: !!e.ended })), state: () => ({ busy: E.busy, done: E.done, error: E.error, blockReason: E.blockReason, issues: E.issues, report: E.report, grant: S.grant, grantAt: S.grantAt, sectionElapsed: S.sectionElapsed, siteTime: S.siteTime, catalogSeconds: S.catalogSeconds, studySeconds: S.studySeconds }) };
 
@@ -750,7 +750,7 @@
     const times = read(LS, SECTION_TIMES, {}), entry = times && times[key];
     return entry && Number.isFinite(entry.elapsed) ? clamp(entry.elapsed, 0, SECTION_LIMIT) : 0;
   }
-  // 平台会在“30分钟没有操作”时先弹出检测；提前切换，避免检测弹窗出现后才失去翻页机会。
+  // 累计29分钟切换，较平台30分钟无操作检测提前1分钟。
   function sectionDue() { return S.sectionElapsed >= SECTION_LIMIT - SECTION_PREEMPT; }
   function saveDwell() {
     if (!TOP) return;
@@ -875,7 +875,7 @@
     if (now - S.savedAt > 5000) { S.savedAt = now; saveDwell(); }
     if (sectionDue()) {
       S.awaitingCompletion = false; S.paused = false;
-      action('本节接近30分钟上限，提前切换以避免平台暂停检测'); next(); return;
+      action('本节累计已达29分钟，切换下一节'); next(); return;
     }
     if (S.awaitingCompletion) {
       if (S.userPaused) { paint(); return; }
@@ -887,7 +887,7 @@
     }
     if (S.paused) { paint(); return; }
     play(); S.media = summary();
-    if (C.mode === 'section') { action('本节累计 ' + fmt(S.sectionElapsed / 1000) + ' / 30分钟，满时切换'); return; }
+    if (C.mode === 'section') { action('本节累计 ' + fmt(S.sectionElapsed / 1000) + ' / 29分钟，满时切换'); return; }
     if (S.elapsed / 1000 < C.minDwell + S.jitter) { action('停留 ' + fmt(S.elapsed / 1000) + ' / ' + fmt(C.minDwell + S.jitter)); return; }
     if (!voicePending()) {
       if (!S.media.ready) { action('等待课件脚本回执，暂不翻页'); return; }
@@ -933,25 +933,25 @@
     const a = S.progress, rec = recordStats();
     const ahead = !!(a && a.siteCompletion != null && a.localCompletion != null && a.localCompletion > a.siteCompletion);
     S.status.textContent = ['状态：' + (!C.enabled ? '已关闭' : S.warning ? '网站提示，已暂停' : !S.owner ? '等待控制权' : S.stopped ? '已结束' : S.paused ? (S.awaitingCompletion ? '等待本节完成' : '已暂停') : '运行中'),
-      '模式：' + (C.mode === 'section' ? '自动识别学时（30分钟上限）' : C.mode === 'completion' ? '完成度模式（30分钟上限）' : '兼容模式（30分钟上限）'),
+      '模式：' + (C.mode === 'section' ? '自动识别学时（29分钟翻页）' : C.mode === 'completion' ? '完成度模式（29分钟上限）' : '兼容模式（29分钟上限）'),
       '当前：' + (info.index >= 0 ? (info.index + 1) + '/' + info.list.length + ' ' + label(info.list[info.index].el) : '等待目录'),
       '完成度：' + (a && a.total > 0 ? a.completion + '%（' + a.done + '/' + a.total + ' 项' + (a.manual ? '，' + a.manual + ' 项需人工' : '') + (ahead ? '，网站仍记录 ' + a.siteCompletion + '%' : '') + '）' : completed(currentItem()) ? '网站已标记完成' : '等待课件'),
       '正确率：' + (a ? a.accuracy + '%' + (a.type === 'objective' ? '（要求 ≥' + a.minAccuracy + '%）' : '') : '—'),
       '人工语音：' + (a && a.voice > 0 ? a.voice + ' 项，按停留时长放行（不要求完成度）' : '—'),
       '学习时长：本页 ' + fmt(S.elapsed / 1000) + ' · 本地累计 ' + fmt(S.total),
-      '本节累计：' + fmt(S.sectionElapsed / 1000) + ' / 30分钟（' + (S.siteTime ? '参考网站' + S.siteTime + '用时 + 本地计时' : '本机计时') + '）',
+      '本节累计：' + fmt(S.sectionElapsed / 1000) + ' / 29分钟（' + (S.siteTime ? '参考网站' + S.siteTime + '用时 + 本地计时' : '本机计时') + '）',
       '自动作答：' + (!C.autoAnswer ? '关闭' : !a ? '等待课件' : a.submitted ? '已提交' : a.total > 0 ? '已填 ' + a.done + '/' + a.total + (a.manual ? '，待人工 ' + a.manual : '') + (a.blockReason ? '，已拦截：' + a.blockReason : '') + (a.error ? '（' + a.error + '）' : '') : '无交互题'),
       '记录：' + rec.count + ' 节 · 平均正确率 ' + rec.accuracy + '%',
       '媒体：' + (!m.ready ? '等待回执' : m.count ? m.done ? '已播完' : m.blocked ? '等待播放' : '播放中' : '本页无音视频'),
       '翻页：本次 ' + S.clicks + '，累计 ' + (Number(stats().clicks) || 0), S.action, '实际学时由网站记录'].join('\n');
   }
   function buildHud() {
-    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.3.6'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
+    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.3.7'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
     hud.style.cssText = 'position:fixed;left:12px;top:12px;z-index:2147483647;width:330px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);box-sizing:border-box;background:rgba(19,24,32,.96);color:#edf1f7;border:1px solid #536278;border-radius:10px;box-shadow:0 5px 22px #0006;font:13px/1.6 system-ui,sans-serif;overflow:hidden;';
     const bs = 'background:#2d3a4e;color:#edf1f7;border:1px solid #536278;border-radius:5px;padding:3px 8px;font:inherit;cursor:pointer';
-    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.3.6</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
+    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.3.7</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
       '<div style="padding:10px 12px;overflow-y:auto;max-height:calc(100vh - 80px);box-sizing:border-box"><div class="wl-ap-status" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>' +
-      '<label style="display:block;margin-top:8px">模式 <select aria-label="运行模式" class="wl-ap-mode" style="background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"><option value="section">自动识别学时：30分钟上限</option><option value="completion">完成度：30分钟上限</option></select></label>' +
+      '<label style="display:block;margin-top:8px">模式 <select aria-label="运行模式" class="wl-ap-mode" style="background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"><option value="section">自动识别学时：29分钟翻页</option><option value="completion">完成度：29分钟上限</option></select></label>' +
       '<label style="display:flex;gap:6px;align-items:center;margin-top:7px"><input type="checkbox" class="wl-ap-auto"> 自动作答（保留已填答案，默认关闭）</label>' +
       '<label style="display:flex;gap:6px;align-items:center;margin-top:5px"><input type="checkbox" class="wl-ap-mute"> 自动静音播放媒体</label>' +
       '<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-top:8px"><label>正确率≥ <input aria-label="自动提交最低正确率" class="wl-ap-min" title="0-100，默认100" style="width:42px;background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"></label></div>' +

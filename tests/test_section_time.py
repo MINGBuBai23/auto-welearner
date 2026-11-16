@@ -1,4 +1,4 @@
-"""Offline browser checks for the 30-minute section policy.
+"""Offline browser checks for switching at 29 minutes of section study.
 
 Uses a virtual clock, an in-memory read-only SCORM fixture, and native-next
 navigation fixtures. No learning account or platform requests are involved.
@@ -20,6 +20,7 @@ URL = "https://welearn.sflep.com/Student/StudyCourse.aspx?cid=timer&sco=101"
 CHILD = "https://centercourseware.sflep.com/timer.html"
 KEY = "/student/studycourse.aspx|timer|"
 LIMIT = 1800000
+DUE = 1740000
 
 TOP = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 <ul>
@@ -124,20 +125,19 @@ def main():
 
         def boundary(f):
             assert f.page.evaluate("() => __WLAP_ENGINE__.config.mode") == "section"
-            # Leave a short safety margin so the platform's 30-minute inactivity
-            # detector cannot fire before the native next action.
-            f.run(1788000)
-            assert f.clicks() == 0 and f.elapsed() < LIMIT, (f.clicks(), f.elapsed())
+            # Switch at 29:00, one minute ahead of the platform timeout.
+            f.run(1738000)
+            assert f.clicks() == 0 and f.elapsed() < DUE, (f.clicks(), f.elapsed())
             f.run(3000)
-            assert f.clicks() == 1 and 1790000 <= f.elapsed() < LIMIT
+            assert f.clicks() == 1 and DUE <= f.elapsed() < DUE + 1000
             f.run(40000)
             assert f.clicks() == 1 and "30秒内未确认课件加载" in f.hud()
-        check("full-30-minute-boundary-blocked-media", boundary)
+        check("29-minute-boundary-blocked-media", boundary)
 
         def no_custom_dwell(f):
             assert f.page.locator("#wl-ap-hud .wl-ap-dwell").count() == 0
             assert f.page.locator("#wl-ap-hud .wl-ap-jit").count() == 0
-            assert f.page.locator("#wl-ap-hud .wl-ap-mode option").all_text_contents() == ["自动识别学时：30分钟上限", "完成度：30分钟上限"]
+            assert f.page.locator("#wl-ap-hud .wl-ap-mode option").all_text_contents() == ["自动识别学时：29分钟翻页", "完成度：29分钟上限"]
             threshold = f.page.locator("#wl-ap-hud .wl-ap-min")
             threshold.fill("invalid")
             f.press("apply")
@@ -160,12 +160,12 @@ def main():
 
         def partial(f):
             f.run(11000)
-            assert f.clicks() == 1 and 1790000 <= f.elapsed() <= LIMIT
-        check("partial-local-time-only-remainder", partial, seed={KEY+"101": {"elapsed": 1780000}})
+            assert f.clicks() == 1 and DUE <= f.elapsed() < DUE + 1000
+        check("partial-local-time-only-remainder", partial, seed={KEY+"101": {"elapsed": 1730000}})
 
         def full(f):
             f.run(3000)
-            assert f.clicks() == 1 and 1790000 <= f.elapsed() <= LIMIT
+            assert f.clicks() == 1 and DUE <= f.elapsed() <= LIMIT
         check("saved-full-section-skips", full, seed={KEY+"101": {"elapsed": LIMIT}})
 
         def chain(f):
@@ -192,8 +192,8 @@ def main():
         check("unavailable-site-time-falls-back", invalid_site, site="unknown")
 
         def no_double(f):
-            f.run(40000)
-            assert f.clicks() == 0 and 1730000 <= f.elapsed() < 1750000, f.elapsed()
+            f.run(30000)
+            assert f.clicks() == 0 and 1730000 <= f.elapsed() < DUE, f.elapsed()
         check("site-and-local-time-not-added-twice", no_double, site="1700")
 
         def reload(f):
@@ -214,13 +214,13 @@ def main():
             f.press("resume")
             f.run(10000)
             assert f.clicks() == 1
-        check("manual-pause-does-not-count-or-skip", paused, seed={KEY+"101": {"elapsed": 1780000}})
+        check("manual-pause-does-not-count-or-skip", paused, seed={KEY+"101": {"elapsed": 1730000}})
 
         def freeze(f):
             before = f.elapsed()
             f.page.clock.fast_forward(120000)
             assert f.elapsed() <= before + 1000 and f.clicks() == 0
-        check("sleep-gap-not-counted", freeze, seed={KEY+"101": {"elapsed": 1780000}})
+        check("sleep-gap-not-counted", freeze, seed={KEY+"101": {"elapsed": 1730000}})
 
         def isolated(f):
             f.run(3000)
@@ -232,9 +232,9 @@ def main():
             f.press("next")
             assert "等待本节完成" in f.hud()
             partial(f)
-        check("completion-wait-has-30-minute-cap", completion_cap,
+        check("completion-wait-has-29-minute-cap", completion_cap,
               cfg={"sectionPolicy": 1, "mode": "completion", "minDwell": 0, "jitterMin": 0, "jitterMax": 0},
-              seed={KEY+"101": {"elapsed": 1780000}})
+              seed={KEY+"101": {"elapsed": 1730000}})
 
         def last(f):
             f.page.evaluate("() => SelectSCO(103)")
@@ -267,11 +267,11 @@ def main():
 
         def directory_full(f):
             f.run(3000)
-            assert f.clicks() == 1 and 1790000 <= f.elapsed() <= LIMIT
+            assert f.clicks() == 1 and DUE <= f.elapsed() <= LIMIT
             assert "参考网站目录用时" in f.hud()
             assert f.catalog_requests == ['GET']
             assert not f.page.evaluate("() => window.__catalogExecuted || false")
-        for value in ['30:00', '30:09', '01:00:00']:
+        for value in ['29:00', '29:40', '30:00', '30:09', '01:00:00']:
             check('directory-' + value.replace(':', '-'), directory_full,
                   url=directory_url, directory=directory.replace('__TIME__', value))
 
@@ -280,14 +280,14 @@ def main():
             state = f.page.evaluate("() => window.__WLAP_ENGINE__.state()")
             assert f.clicks() == 1 and state["siteTime"] == "目录+课件" and state["studySeconds"] == 1800
         check('directory-and-scorm-use-later-value', directory_and_scorm_use_later_value,
-              url=directory_url, directory=directory.replace('__TIME__', '29:00'), site='1800')
+              url=directory_url, directory=directory.replace('__TIME__', '28:00'), site='1800')
 
         def directory_partial(f):
-            assert f.clicks() == 0 and 1780000 <= f.elapsed() < 1790000
+            assert f.clicks() == 0 and 1730000 <= f.elapsed() < DUE
             f.run(11000)
             assert f.clicks() == 1
         check('directory-partial-waits-to-safety-margin', directory_partial, url=directory_url,
-              directory=directory.replace('__TIME__', '29:40'))
+              directory=directory.replace('__TIME__', '28:50'))
 
         def seconds_not_minutes(f):
             assert f.clicks() == 0 and 30000 <= f.elapsed() < 35000
