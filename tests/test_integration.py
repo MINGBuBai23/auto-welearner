@@ -369,8 +369,6 @@ def main():
         page6.wait_for_timeout(2500)
         hud_after_switch = page6.inner_text("#wl-ap-hud")
         records_switch = page6.evaluate("() => JSON.parse(localStorage.getItem('wl_ap_records_v32') || '{}')")
-        page6.fill("#wl-ap-hud .wl-ap-dwell", "1")
-        page6.click("#wl-ap-hud button[data-act='apply']")
         page6.click("#wl-ap-hud button[data-act='resume']")
         page6.wait_for_timeout(3000)
         entry6 = {

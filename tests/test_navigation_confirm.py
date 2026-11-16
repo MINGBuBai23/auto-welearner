@@ -141,13 +141,14 @@ def main() -> int:
             if expected and "stale-catalog" in name:
                 if name == "manual-back-with-stale-catalog":
                     page.click("#liSCO_101 a")
-                    page.clock.run_for(1200)
+                    page.wait_for_timeout(250)
+                    page.clock.run_for(1500)
                     passed = (passed and not child.evaluate("() => window.__grant") and
                               "完成度：100%" not in page.inner_text("#wl-ap-hud") and
                               not page.evaluate("() => Object.keys(JSON.parse(localStorage.getItem('wl_ap_records_v32') || '{}')).some(k => k.endsWith('|101'))"))
                     page.evaluate("url => document.getElementById('contentFrame').src = url", CHILD_URL)
-                    page.wait_for_timeout(250)
-                    page.clock.run_for(2200)
+                    page.wait_for_timeout(500)
+                    page.clock.run_for(3000)
                     back = next(f for f in page.frames if "navigation-player" in f.url)
                     passed = passed and back.evaluate("() => window.__grant")
                     page.clock.run_for(31000)

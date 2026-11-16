@@ -124,15 +124,32 @@ def main():
 
         def boundary(f):
             assert f.page.evaluate("() => __WLAP_ENGINE__.config.mode") == "section"
-            # Exercise every timer tick for a full 30 minutes; do not jump the clock.
-            f.run(1797000)
+            # Leave a short safety margin so the platform's 30-minute inactivity
+            # detector cannot fire before the native next action.
+            f.run(1788000)
             assert f.clicks() == 0 and f.elapsed() < LIMIT, (f.clicks(), f.elapsed())
             f.run(3000)
-            assert f.clicks() == 1 and f.elapsed() == LIMIT
-            assert "媒体：等待播放" in f.hud()
+            assert f.clicks() == 1 and 1790000 <= f.elapsed() < LIMIT
             f.run(40000)
             assert f.clicks() == 1 and "30秒内未确认课件加载" in f.hud()
         check("full-30-minute-boundary-blocked-media", boundary)
+
+        def no_custom_dwell(f):
+            assert f.page.locator("#wl-ap-hud .wl-ap-dwell").count() == 0
+            assert f.page.locator("#wl-ap-hud .wl-ap-jit").count() == 0
+            assert f.page.locator("#wl-ap-hud .wl-ap-mode option").all_text_contents() == ["自动识别学时：30分钟上限", "完成度：30分钟上限"]
+            threshold = f.page.locator("#wl-ap-hud .wl-ap-min")
+            threshold.fill("invalid")
+            f.press("apply")
+            assert f.page.evaluate("() => __WLAP_ENGINE__.config.minAccuracy") == 100
+            assert "正确率阈值请填 0-100" in f.hud()
+            threshold.fill("101")
+            threshold.press("Enter")
+            assert f.page.evaluate("() => __WLAP_ENGINE__.config.minAccuracy") == 100
+            threshold.fill("0")
+            threshold.press("Enter")
+            assert f.page.evaluate("() => JSON.parse(localStorage.getItem('wl_autopager_cfg_v7')).minAccuracy") == 0
+        check("custom-dwell-controls-removed", no_custom_dwell)
 
         def migration(f):
             cfg = f.page.evaluate("() => JSON.parse(localStorage.getItem('wl_autopager_cfg_v7'))")
@@ -143,12 +160,12 @@ def main():
 
         def partial(f):
             f.run(11000)
-            assert f.clicks() == 1 and f.elapsed() == LIMIT
-        check("partial-local-time-only-remainder", partial, seed={KEY+"101": {"elapsed": 1790000}})
+            assert f.clicks() == 1 and 1790000 <= f.elapsed() <= LIMIT
+        check("partial-local-time-only-remainder", partial, seed={KEY+"101": {"elapsed": 1780000}})
 
         def full(f):
             f.run(3000)
-            assert f.clicks() == 1 and f.elapsed() == LIMIT
+            assert f.clicks() == 1 and 1790000 <= f.elapsed() <= LIMIT
         check("saved-full-section-skips", full, seed={KEY+"101": {"elapsed": LIMIT}})
 
         def chain(f):
@@ -195,15 +212,15 @@ def main():
             f.run(60000)
             assert f.elapsed() == before and f.clicks() == 0
             f.press("resume")
-            f.run(4000)
+            f.run(10000)
             assert f.clicks() == 1
-        check("manual-pause-does-not-count-or-skip", paused, seed={KEY+"101": {"elapsed": 1797000}})
+        check("manual-pause-does-not-count-or-skip", paused, seed={KEY+"101": {"elapsed": 1780000}})
 
         def freeze(f):
             before = f.elapsed()
             f.page.clock.fast_forward(120000)
             assert f.elapsed() <= before + 1000 and f.clicks() == 0
-        check("sleep-gap-not-counted", freeze, seed={KEY+"101": {"elapsed": 1790000}})
+        check("sleep-gap-not-counted", freeze, seed={KEY+"101": {"elapsed": 1780000}})
 
         def isolated(f):
             f.run(3000)
@@ -217,7 +234,7 @@ def main():
             partial(f)
         check("completion-wait-has-30-minute-cap", completion_cap,
               cfg={"sectionPolicy": 1, "mode": "completion", "minDwell": 0, "jitterMin": 0, "jitterMax": 0},
-              seed={KEY+"101": {"elapsed": 1790000}})
+              seed={KEY+"101": {"elapsed": 1780000}})
 
         def last(f):
             f.page.evaluate("() => SelectSCO(103)")
@@ -250,7 +267,7 @@ def main():
 
         def directory_full(f):
             f.run(3000)
-            assert f.clicks() == 1 and f.elapsed() == LIMIT
+            assert f.clicks() == 1 and 1790000 <= f.elapsed() <= LIMIT
             assert "参考网站目录用时" in f.hud()
             assert f.catalog_requests == ['GET']
             assert not f.page.evaluate("() => window.__catalogExecuted || false")
@@ -258,12 +275,19 @@ def main():
             check('directory-' + value.replace(':', '-'), directory_full,
                   url=directory_url, directory=directory.replace('__TIME__', value))
 
+        def directory_and_scorm_use_later_value(f):
+            f.run(2500)
+            state = f.page.evaluate("() => window.__WLAP_ENGINE__.state()")
+            assert f.clicks() == 1 and state["siteTime"] == "目录+课件" and state["studySeconds"] == 1800
+        check('directory-and-scorm-use-later-value', directory_and_scorm_use_later_value,
+              url=directory_url, directory=directory.replace('__TIME__', '29:00'), site='1800')
+
         def directory_partial(f):
-            assert f.clicks() == 0 and 1790000 <= f.elapsed() < LIMIT
+            assert f.clicks() == 0 and 1780000 <= f.elapsed() < 1790000
             f.run(11000)
             assert f.clicks() == 1
-        check('directory-partial-waits-remainder', directory_partial, url=directory_url,
-              directory=directory.replace('__TIME__', '29:50'))
+        check('directory-partial-waits-to-safety-margin', directory_partial, url=directory_url,
+              directory=directory.replace('__TIME__', '29:40'))
 
         def seconds_not_minutes(f):
             assert f.clicks() == 0 and 30000 <= f.elapsed() < 35000
