@@ -55,25 +55,31 @@ HTMLMediaElement.prototype.play=function(){return Promise.reject(new Error('fixt
 
 
 class Fixture:
-    def __init__(self, browser, seed=None, cfg=None, site=None, navigate=False, top_extra="", url=URL, directory=""):
+    def __init__(self, browser, seed=None, cfg=None, site=None, navigate=False, top_extra="", url=URL, directory="", defer_directory=False, session=None):
         self.ctx = browser.new_context(viewport={"width": 1440, "height": 1000})
         self.page = self.ctx.new_page()
         self.errors = []
         self.key = '/student/studycourse.aspx|' + parse_qs(urlparse(url).query)['cid'][0] + '|'
         self.catalog_requests = []
+        self.pending_catalog = None
+        self.directory = directory
         self.page.on("pageerror", lambda e: self.errors.append(str(e)))
         self.page.clock.install()
         init = """if(window.top===window && !localStorage.__seeded){
           localStorage.__seeded='1';localStorage.setItem('wl_ap_section_times_v1',JSON.stringify(__SEED__));
+          if(__SESSION__!==null)sessionStorage.setItem('wl_ap_dwell_v3',JSON.stringify(__SESSION__));
           if(__CFG__!==null)localStorage.setItem('wl_autopager_cfg_v7',JSON.stringify(__CFG__));} """
-        init = init.replace("__SEED__", json.dumps(seed or {})).replace("__CFG__", json.dumps(cfg))
+        init = init.replace("__SEED__", json.dumps(seed or {})).replace("__CFG__", json.dumps(cfg)).replace("__SESSION__", json.dumps(session))
         self.page.add_init_script(init)
         self.page.add_init_script(SCRIPT)
         player = PLAYER.replace("__SITE__", json.dumps(site))
         self.ctx.route(CHILD + "*", lambda r: r.fulfill(content_type="text/html", body=player))
         def serve_directory(r):
             self.catalog_requests.append(r.request.method)
-            r.fulfill(content_type="text/html; charset=utf-8", body=directory)
+            if defer_directory:
+                self.pending_catalog = r
+            else:
+                r.fulfill(content_type="text/html; charset=utf-8", body=directory)
         self.ctx.route("https://welearn.sflep.com/student/course_info.aspx*", serve_directory)
         top = TOP.replace("__CHILD__", CHILD).replace("__NAVIGATE__", "SelectSCO(__id+1);" if navigate else "")
         top = top.replace("</body>", top_extra + "</body>")
@@ -102,6 +108,12 @@ class Fixture:
 
     def press(self, act):
         self.page.click(f"#wl-ap-hud [data-act='{act}']")
+
+    def release_catalog(self):
+        assert self.pending_catalog is not None
+        self.pending_catalog.fulfill(content_type="text/html; charset=utf-8", body=self.directory)
+        self.pending_catalog = None
+        self.page.wait_for_timeout(100)
 
 
 def main():
@@ -275,11 +287,14 @@ def main():
             check('directory-' + value.replace(':', '-'), directory_full,
                   url=directory_url, directory=directory.replace('__TIME__', value))
 
-        def directory_and_scorm_use_later_value(f):
+        def directory_overrides_scorm(f):
             f.run(2500)
             state = f.page.evaluate("() => window.__WLAP_ENGINE__.state()")
-            assert f.clicks() == 1 and state["siteTime"] == "目录+课件" and state["studySeconds"] == 1800
-        check('directory-and-scorm-use-later-value', directory_and_scorm_use_later_value,
+            assert f.clicks() == 0 and state["siteTime"] == "目录" and state["studySeconds"] == 1800
+            assert 1680000 <= f.elapsed() < 1690000
+            f.run(61000)
+            assert f.clicks() == 1
+        check('directory-overrides-inflated-scorm', directory_overrides_scorm,
               url=directory_url, directory=directory.replace('__TIME__', '28:00'), site='1800')
 
         def directory_partial(f):
@@ -288,6 +303,77 @@ def main():
             assert f.clicks() == 1
         check('directory-partial-waits-to-safety-margin', directory_partial, url=directory_url,
               directory=directory.replace('__TIME__', '28:50'))
+
+        directory_key = '/student/studycourse.aspx|2416|'
+        stale = {directory_key+'101': {'elapsed': LIMIT}}
+
+        def catalog_replaces_local(f):
+            assert f.clicks() == 0 and 120000 <= f.elapsed() < 125000
+            f.run(60000)
+            assert f.clicks() == 0 and 180000 <= f.elapsed() < 185000
+        check('directory-replaces-inflated-local-record', catalog_replaces_local, url=directory_url,
+              directory=directory.replace('__TIME__', '02:00'), seed=stale)
+
+        def catalog_zero(f):
+            f.run(3000)
+            state = f.page.evaluate("() => __WLAP_ENGINE__.state()")
+            assert f.clicks() == 0 and f.elapsed() < 10000
+            assert state['catalogSeconds'] == 0 and state['studySeconds'] == 1800
+        check('directory-zero-overrides-scorm-and-local', catalog_zero, url=directory_url,
+              directory=directory.replace('__TIME__', '00:00'), seed=stale, site='1800')
+
+        check('directory-remaining-ignores-stale-local-and-scorm', directory_partial, url=directory_url,
+              directory=directory.replace('__TIME__', '28:50'), seed=stale, site='1800')
+
+        def catalog_reload(f):
+            assert f.clicks() == 0 and 120000 <= f.elapsed() < 125000
+            f.run(20000)
+            assert f.clicks() == 0 and 140000 <= f.elapsed() < 145000
+            f.page.reload()
+            f.page.wait_for_selector('#wl-ap-hud')
+            f.page.wait_for_timeout(100)
+            f.run(1500)
+            assert f.clicks() == 0 and 120000 <= f.elapsed() < 125000
+        check('directory-refresh-rebases-restored-session', catalog_reload, url=directory_url,
+              directory=directory.replace('__TIME__', '02:00'), seed=stale, site='1800',
+              session={'key': directory_key+'101', 'elapsed': LIMIT, 'jitter': 0})
+
+        def catalog_delayed(f):
+            f.run(3000)
+            assert f.clicks() == 0
+            f.release_catalog()
+            f.run(2000)
+            assert f.clicks() == 0 and 120000 <= f.elapsed() < 125000
+        check('directory-delayed-response-rebases-fallback', catalog_delayed, url=directory_url,
+              directory=directory.replace('__TIME__', '02:00'), seed=stale, site='1800', defer_directory=True)
+
+        def catalog_chain(f):
+            for _ in range(5):
+                f.run(1500)
+            assert f.clicks() == 1 and f.page.evaluate('() => __id') == 102
+            assert 120000 <= f.elapsed('102') < 135000
+        second = directory.replace("StartSCO('101')", "StartSCO('102')").replace('__TIME__', '02:00')
+        check('directory-next-section-does-not-cascade', catalog_chain, url=directory_url, navigate=True,
+              directory=directory.replace('__TIME__', '30:00') + second, site='1800',
+              seed={directory_key+'102': {'elapsed': LIMIT}})
+
+        def catalog_no_double(f):
+            f.run(30000)
+            assert f.clicks() == 0 and 150000 <= f.elapsed() < 155000
+            f.page.evaluate("() => {const span=document.createElement('span');span.textContent='用时 02:30';document.getElementById('liSCO_101').appendChild(span)}")
+            f.run(30000)
+            assert f.clicks() == 0 and 180000 <= f.elapsed() < 185000
+        check('directory-live-time-not-double-counted', catalog_no_double, url=directory_url,
+              directory=directory.replace('__TIME__', '02:00'), site='1800')
+
+        def inline_rebase(f):
+            f.page.evaluate("() => {const span=document.createElement('span');span.textContent='用时 02:00';document.getElementById('liSCO_101').appendChild(span)}")
+            f.run(1500)
+            f.press('toggle')
+            f.run(3000)
+            assert f.clicks() == 0 and 120000 <= f.elapsed() < 125000
+        check('inline-directory-replaces-inflated-fallback', inline_rebase, cfg={'enabled': False},
+              seed={KEY+'101': {'elapsed': LIMIT}}, site='1800')
 
         def seconds_not_minutes(f):
             assert f.clicks() == 0 and 30000 <= f.elapsed() < 35000

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WE Learn 自动挂机翻页
 // @namespace    local.welearn.autopager
-// @version      3.3.7
-// @description  单标签页自动识别每节学时，累计29分钟翻页；支持媒体播放、自动作答与完成度核算
+// @version      3.3.8
+// @description  按目录用时补足至29分钟翻页，修复旧累计导致误跳；支持媒体播放、自动作答与完成度核算
 // @match        https://welearn.sflep.com/*
 // @match        https://*.sflep.com/*
 // @match        https://*.sflep.cn/*
@@ -24,7 +24,7 @@
   const LS = storage('localStorage'), SS = storage('sessionStorage');
   const C = { enabled: true, minDwell: 20, jitterMin: 0, jitterMax: 9, maxPages: 300, mode: 'section', sectionPolicy: 1, autoAnswer: false, minAccuracy: 100, muteMedia: true };
   const S = { owner: false, pending: false, release: null, candidate: 0, lockError: '', paused: false,
-    stopped: false, warning: '', reentry: false, key: '', elapsed: 0, sectionElapsed: 0, siteTime: false, jitter: 0, lastTick: Date.now(),
+    stopped: false, warning: '', reentry: false, key: '', elapsed: 0, visitElapsed: 0, sectionElapsed: 0, siteTime: false, jitter: 0, lastTick: Date.now(),
     awaiting: null, frame: null, busy: false, src: '', observer: null, reports: new Map(),
     grantAt: 0, grant: false, parentOrigin: '', action: '初始化', clicks: 0, clickedAt: 0, savedAt: 0,
     media: { count: 0, done: true, ready: true, playing: false, blocked: false }, hud: null, position: null, dragging: false,
@@ -113,14 +113,12 @@
   }
   function syncCatalogTime() {
     const inline = catalogTime(currentItem()), seconds = inline == null ? S.catalogTimes.get(current()) : inline;
-    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return false;
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return S.catalogSeconds != null;
+    // 首次取得当前小节目录用时，重新建立基准；旧本机累计和课件总时长可能属于失效记录。
+    if (S.catalogSeconds == null) S.sectionElapsed = Math.min(SECTION_LIMIT, seconds * 1000 + S.visitElapsed);
+    else S.sectionElapsed = Math.max(S.sectionElapsed, Math.min(SECTION_LIMIT, seconds * 1000));
     S.siteTime = '目录';
     S.catalogSeconds = seconds;
-    S.sectionElapsed = Math.max(S.sectionElapsed, Math.min(SECTION_LIMIT, seconds * 1000));
-    if (typeof S.studySeconds === 'number' && S.studySeconds >= seconds) {
-      S.siteTime = '目录+课件';
-      S.sectionElapsed = Math.max(S.sectionElapsed, Math.min(SECTION_LIMIT, S.studySeconds * 1000));
-    }
     return true;
   }
   async function loadCatalogTimes() {
@@ -153,7 +151,7 @@
         navigator.locks.request('welearn-autopager-v3', { ifAvailable: true }, async lock => {
           if (!lock) return;
           S.owner = true; S.lockError = ''; S.lastTick = Date.now();
-          S.sectionElapsed = Math.max(S.sectionElapsed, sectionTime(S.key));
+          if (S.catalogSeconds == null) S.sectionElapsed = Math.max(S.sectionElapsed, sectionTime(S.key));
           await new Promise(resolve => { S.release = resolve; });
           S.owner = false; S.release = null;
         }).catch(() => { S.owner = false; S.lockError = '互斥锁不可用，已停止操作'; }).finally(() => { S.pending = false; });
@@ -608,7 +606,7 @@
   }
 
   // 供自动化测试与诊断使用；正式运行时同样可用。
-  W.__WLAP_ENGINE__ = { version: '3.3.7', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
+  W.__WLAP_ENGINE__ = { version: '3.3.8', isCourseware: isCourseware, analyze: analyze, fillPage: fillPage, submitPage: submitPage,
     runPage: runPage, route: route, config: C, gate: gateFor, mediaCount: () => mediaEls().length,
     mediaState: () => mediaEls().map(e => ({ muted: !!e.muted, paused: !!e.paused, ended: !!e.ended })), state: () => ({ busy: E.busy, done: E.done, error: E.error, blockReason: E.blockReason, issues: E.issues, report: E.report, grant: S.grant, grantAt: S.grantAt, sectionElapsed: S.sectionElapsed, siteTime: S.siteTime, catalogSeconds: S.catalogSeconds, studySeconds: S.studySeconds }) };
 
@@ -651,10 +649,9 @@
           const hasStudySeconds = typeof p.studySeconds === 'number' && Number.isFinite(p.studySeconds) && p.studySeconds >= 0;
           if (hasStudySeconds) S.studySeconds = p.studySeconds;
           const catalogKnown = syncCatalogTime();
-          if (!S.catalogLoading && hasStudySeconds) {
+          if (!catalogKnown && !S.catalogLoading && hasStudySeconds) {
             S.sectionElapsed = Math.max(S.sectionElapsed, Math.min(SECTION_LIMIT, p.studySeconds * 1000));
-            if (!catalogKnown) S.siteTime = '课件';
-            else if (S.catalogSeconds != null && p.studySeconds >= S.catalogSeconds) S.siteTime = '目录+课件';
+            S.siteTime = '课件';
           }
           recordAuto(S.progress);
         }
@@ -757,7 +754,8 @@
     write(SS, 'wl_ap_dwell_v3', { key: S.key, elapsed: S.elapsed, jitter: S.jitter });
     if (!S.owner || !S.key || !current()) return;
     const stored = read(LS, SECTION_TIMES, {}), times = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
-    const elapsed = Math.max(sectionTime(S.key), clamp(S.sectionElapsed, 0, SECTION_LIMIT));
+    const measured = clamp(S.sectionElapsed, 0, SECTION_LIMIT);
+    const elapsed = S.catalogSeconds != null ? measured : Math.max(sectionTime(S.key), measured);
     times[S.key] = { elapsed: elapsed, at: Date.now() };
     write(LS, SECTION_TIMES, times);
   }
@@ -776,11 +774,11 @@
     S.sectionSwitching = true;
     S.progress = null;
     S.progressArmed = false;
-    S.key = key; S.elapsed = 0; S.sectionElapsed = sectionTime(key); S.siteTime = false; S.catalogSeconds = null; S.studySeconds = null; S.jitter = jitter(); S.lastTick = Date.now();
+    S.key = key; S.elapsed = 0; S.visitElapsed = 0; S.sectionElapsed = sectionTime(key); S.siteTime = false; S.catalogSeconds = null; S.studySeconds = null; S.jitter = jitter(); S.lastTick = Date.now();
     saveDwell();
     broadcast();
   }
-  function reset(key = pageKey()) { saveDwell(); S.key = key; S.elapsed = 0; S.sectionElapsed = sectionTime(key); S.siteTime = false; S.catalogSeconds = null; S.studySeconds = null; S.jitter = jitter(); S.lastTick = Date.now(); S.progress = null; saveDwell(); }
+  function reset(key = pageKey()) { saveDwell(); S.key = key; S.elapsed = 0; S.visitElapsed = 0; S.sectionElapsed = sectionTime(key); S.siteTime = false; S.catalogSeconds = null; S.studySeconds = null; S.jitter = jitter(); S.lastTick = Date.now(); S.progress = null; saveDwell(); }
   function restore() {
     S.sectionElapsed = sectionTime(S.key);
     const d = read(SS, 'wl_ap_dwell_v3', null);
@@ -871,7 +869,7 @@
     if (S.catalogLoading) { action('读取目录用时'); return; }
     if ((Number(stats().clicks) || 0) >= C.maxPages) { S.stopped = true; action('已达到本标签页翻页上限'); broadcast(); return; }
     // 只计控制中的有效停留；加载、人工暂停、系统睡眠/冻结均不补算。
-    if (delta >= 0 && delta <= 15000) { S.elapsed += delta; S.sectionElapsed = Math.min(SECTION_LIMIT, S.sectionElapsed + delta); }
+    if (delta >= 0 && delta <= 15000) { S.elapsed += delta; S.visitElapsed += delta; S.sectionElapsed = Math.min(SECTION_LIMIT, S.sectionElapsed + delta); }
     if (now - S.savedAt > 5000) { S.savedAt = now; saveDwell(); }
     if (sectionDue()) {
       S.awaitingCompletion = false; S.paused = false;
@@ -946,10 +944,10 @@
       '翻页：本次 ' + S.clicks + '，累计 ' + (Number(stats().clicks) || 0), S.action, '实际学时由网站记录'].join('\n');
   }
   function buildHud() {
-    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.3.7'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
+    const hud = document.createElement('aside'); hud.id = HUD; hud.dataset.version = '3.3.8'; hud.setAttribute('aria-label', 'WE Learn 自动翻页面板');
     hud.style.cssText = 'position:fixed;left:12px;top:12px;z-index:2147483647;width:330px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);box-sizing:border-box;background:rgba(19,24,32,.96);color:#edf1f7;border:1px solid #536278;border-radius:10px;box-shadow:0 5px 22px #0006;font:13px/1.6 system-ui,sans-serif;overflow:hidden;';
     const bs = 'background:#2d3a4e;color:#edf1f7;border:1px solid #536278;border-radius:5px;padding:3px 8px;font:inherit;cursor:pointer';
-    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.3.7</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
+    hud.innerHTML = '<div class="wl-ap-drag" tabindex="0" role="group" aria-label="拖动面板；方向键移动，Home复位" style="padding:9px 11px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#283448;cursor:move;touch-action:none;user-select:none"><strong>WE Learn 自动翻页 3.3.8</strong><button data-act="reset" title="面板回到左下角" style="' + bs + '">复位</button></div>' +
       '<div style="padding:10px 12px;overflow-y:auto;max-height:calc(100vh - 80px);box-sizing:border-box"><div class="wl-ap-status" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>' +
       '<label style="display:block;margin-top:8px">模式 <select aria-label="运行模式" class="wl-ap-mode" style="background:#172030;color:#fff;border:1px solid #6b7c94;border-radius:4px;padding:3px"><option value="section">自动识别学时：29分钟翻页</option><option value="completion">完成度：29分钟上限</option></select></label>' +
       '<label style="display:flex;gap:6px;align-items:center;margin-top:7px"><input type="checkbox" class="wl-ap-auto"> 自动作答（保留已填答案，默认关闭）</label>' +

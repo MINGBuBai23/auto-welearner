@@ -1,4 +1,33 @@
-# WE Learn 自动翻页 3.3.7 测试报告
+# WE Learn 自动翻页 3.3.8 测试报告
+
+验证日期：2026-11-17。测试对象：`welearn-autopager.user.js` 3.3.8。
+
+## 目录不足29分钟却误跳
+
+E1：旧版取目录、课件和本机记录的最大值。离线复现：目录 `02:00`，本机记录29分钟或课件上报30分钟时，进入约5秒就点击下一节。该复现确认了时长冲突可触发误跳，未读取用户真实账号的记录。
+
+E2：修复后首次取得当前小节目录用时时，重新建立“目录起点 + 本次有效停留”的基准；目录有效时不再采用偏大的旧本机记录或课件累计。修正后的本地值可以覆盖旧高值。刷新或重新进入同节时重新建立基准，目录尚未入账的停留不会通过旧记录补算。目录不可读时沿用课件与本机回退。
+
+| 命令 | 结果 |
+| --- | --- |
+| `node --check welearn-autopager.user.js` | 通过，退出码0 |
+| `python tests/test_section_time.py` | `PASS 41/41`，退出码0 |
+| `python tests/test_navigation_confirm.py` | `PASS 12/12`，退出码0 |
+| `python tests/test_integration.py` | `PASS`，退出码0 |
+| `git diff --check` | 通过，退出码0 |
+
+E3：专项新增目录低值覆盖旧高值、有效零时长、补足剩余时间、刷新时旧session隔离、目录延迟返回、下一小节不连续误跳、目录实时更新不重复累加及内联目录覆盖回退值。保留29分钟边界、已满跳过、暂停、冻结、末节、只读SCORM及正确率控件验证。
+
+本轮使用离线夹具和虚拟时钟，未在真实学习账号等待29分钟；真实平台入账与自动退出行为仍未实测。日志与发布收据位于 `tests/artifacts/section-time/`。
+
+本地备份：`C:\Users\明不白\Documents\welearn脚本\.backups\3.3.7-before-catalog-priority`。回滚脚本核对8份备份哈希后恢复源工程和发布副本；先用 `-WhatIf` 预览。它只恢复本地文件，GitHub回滚需要对本轮发布提交执行 `git revert`。
+
+```powershell
+& 'C:\Users\明不白\Documents\welearn脚本\.backups\3.3.7-before-catalog-priority\rollback.ps1' -WhatIf
+& 'C:\Users\明不白\Documents\welearn脚本\.backups\3.3.7-before-catalog-priority\rollback.ps1'
+```
+
+## 3.3.7 测试存档
 
 验证日期：2026-11-16。测试对象：`welearn-autopager.user.js` 3.3.7。
 
